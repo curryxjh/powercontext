@@ -73,6 +73,15 @@ cleanup() {
     trap - EXIT INT TERM
     set +e
 
+    if [ "$status" -ne 0 ]; then
+        echo "Harness failed with exit code $status; dumping Compose service logs before cleanup." >&2
+        docker compose $compose_files logs --no-color --timestamps --tail=200 >&2
+        logs_status=$?
+        if [ "$logs_status" -ne 0 ]; then
+            echo "Compose log dump failed with exit code $logs_status" >&2
+        fi
+    fi
+
     docker compose $compose_files down --volumes --remove-orphans
     cleanup_status=$?
     if [ "$cleanup_status" -ne 0 ]; then

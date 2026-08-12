@@ -31,6 +31,7 @@ def test_failure_cleans_compose_resources_and_preserves_exit_code(
 
     assert result.returncode == exit_code
     assert list(state.iterdir()) == []
+    assert "fake compose logs" in result.stderr
 
 
 def test_cleanup_failure_does_not_mask_harness_exit_code(tmp_path: Path) -> None:
@@ -43,6 +44,7 @@ def test_cleanup_failure_does_not_mask_harness_exit_code(tmp_path: Path) -> None
 
     assert result.returncode == 33
     assert list(state.iterdir()) == []
+    assert "fake compose logs" in result.stderr
     assert "Compose cleanup failed with exit code 71" in result.stderr
 
 
@@ -55,6 +57,7 @@ def test_success_uses_the_same_cleanup_path(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     assert list(state.iterdir()) == []
+    assert "fake compose logs" not in result.stderr
 
 
 def test_cleanup_failure_makes_a_successful_run_fail(tmp_path: Path) -> None:
@@ -67,6 +70,7 @@ def test_cleanup_failure_makes_a_successful_run_fail(tmp_path: Path) -> None:
 
     assert result.returncode == 71
     assert list(state.iterdir()) == []
+    assert "fake compose logs" not in result.stderr
     assert "Compose cleanup failed with exit code 71" in result.stderr
 
 
@@ -89,7 +93,7 @@ set -eu
 command=
 for argument in "$@"; do
     case "$argument" in
-        build | config | down | run | up)
+        build | config | down | logs | run | up)
             command=$argument
             break
             ;;
@@ -106,6 +110,9 @@ case "$command" in
     down)
         rm -f "$FAKE_DOCKER_STATE"/*
         exit "$FAKE_DOCKER_CLEANUP_EXIT"
+        ;;
+    logs)
+        echo "fake compose logs" >&2
         ;;
 esac
 """,
