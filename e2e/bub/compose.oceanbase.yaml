@@ -6,7 +6,7 @@ services:
       OB_DATABASE: powercontext
       OB_DATAFILE_SIZE: 2G
       OB_LOG_DISK_SIZE: 4G
-      OB_TENANT_PASSWORD: powercontext-e2e
+      OB_TENANT_PASSWORD: powercontexte2e123
     healthcheck:
       test:
         - CMD-SHELL
@@ -31,7 +31,7 @@ services:
     environment:
       POWERCONTEXT_SERVER_DATABASE_KIND: oceanbase
       POWERCONTEXT_SERVER_DATABASE_URL: >-
-        mysql+aoceanbase://root%40test:powercontext-e2e@oceanbase:2881/powercontext?charset=utf8mb4
+        mysql+aoceanbase://root%40test:powercontexte2e123@oceanbase:2881/powercontext?charset=utf8mb4
 
 volumes:
   oceanbase-data:
