@@ -19,6 +19,7 @@ from pathlib import Path
 import yaml
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[2] / "integrations" / "agent-plugin" / "powercontext"
+REPOSITORY_ROOT = PLUGIN_ROOT.parents[2]
 
 
 def test_agent_plugin_manifest_uses_portable_schema_fields() -> None:
@@ -82,12 +83,11 @@ def test_project_context_skill_is_reusable_and_preserves_powercontext_workflows(
         "remember_memory",
         "revise_memory_entry",
         "retire_memory_entry",
-        "capture_content_source",
-        "activate_handoff",
-        "`boundary_source`",
-        "finalize_handoff",
+        "handoff_current_work",
         'selection: "prepared"',
-        "commit_handoff",
+        "continue_handoff",
+        "acknowledge_handoff",
+        "record_task_outcome",
         "Degrade Safely",
     ):
         assert required in content
@@ -104,11 +104,35 @@ def test_project_context_skill_is_reusable_and_preserves_powercontext_workflows(
         assert forbidden not in content
 
 
+def test_project_context_skill_uses_default_model_free_handoff_flow() -> None:
+    content = (PLUGIN_ROOT / "skills" / "project-context" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "without invoking a generation model" in content
+    assert "handoff_current_work" in content
+    assert "activate_handoff" not in content
+    assert "finalize_handoff" not in content
+    assert "`boundary_source`" not in content
+
+
 def test_agent_plugin_readme_documents_server_and_auth_boundaries() -> None:
     content = (PLUGIN_ROOT / "README.md").read_text(encoding="utf-8")
 
     assert "powercontext server run" in content
     assert "http://127.0.0.1:8000/mcp" in content
+    assert "chat.pluginLocations" in content
     assert "static credentials" in content
     assert "does not embed" in content
     assert "storage" in content
+
+
+def test_agent_plugin_docs_include_verified_host_loading_procedure() -> None:
+    for relative_path in (
+        "docs/en/docs/how-to/configure-agent-plugin.md",
+        "docs/zh/docs/how-to/configure-agent-plugin.md",
+    ):
+        content = (REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
+
+        assert "VS Code" in content
+        assert "chat.plugins.enabled" in content
+        assert "chat.pluginLocations" in content
+        assert "/absolute/path/to/powercontext/integrations/agent-plugin/powercontext" in content

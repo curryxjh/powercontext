@@ -1,6 +1,6 @@
 ---
 title: 接口
-description: 在 Codex 插件、DeepSeek Harness 插件、Pi package、CLI、Python SDK、HTTP 和 MCP 之间选择。
+description: 在 Agent 集成、CLI、Python SDK、HTTP 和 MCP 之间选择。
 ---
 
 # 接口
@@ -10,7 +10,9 @@ description: 在 Codex 插件、DeepSeek Harness 插件、Pi package、CLI、Pyt
 | 接口 | 适用场景 | 安装 |
 | --- | --- | --- |
 | Codex 插件 | 在 Codex 中跨会话恢复和显式维护 Memory | `powercontext setup codex` |
+| Pydantic AI 适配器 | Memory 工具、自动 Context 准备和可选轨迹采集 | `powercontext-pydantic-ai` |
 | DeepSeek Harness 插件 | 在 DeepSeek Harness 中跨会话恢复和显式维护 Memory | `powercontext setup dsh` |
+| LangChain middleware | 在 `create_agent` 中提供有界召回和完成轮次 Source 采集 | `powercontext-langchain` |
 | LangGraph 适配器 | 在 LangGraph 图中提供 Memory 工具和有界召回 | `powercontext-langgraph` |
 | Pi package | 在 Pi 中跨会话恢复、使用原生 Memory/Handoff 工具和 skill | `powercontext setup pi` |
 | CLI | 配置、诊断、Server 控制、能力检查和人工 Candidate 审核 | `powercontext[cli,server]` |
@@ -63,6 +65,12 @@ Handoff Report 的 JSON Workstream projection 同时返回 `handoff_revision_cou
 project-context skill 指导 DeepSeek Harness 何时检索、记忆、修订或停用 Memory。每轮模型开口前，插件会恢复相关
 条目，并把用户输入采集为 Source 证据；具名 `pc_*` 工具执行显式 HTTP 操作。插件不会启动或内嵌 Server。
 
+## Pydantic AI 适配器
+
+独立发行的 `powercontext-pydantic-ai` 通过公共 Python Client 提供三个 Memory 工具，并可自动前置有界
+`PreparedContext`。可选 Capture 会保存经过清洗和限长的可见模型事件与已完成工具事件，执行 checkpoint Flush，并在
+run 结束后 Flush 剩余 Source。MCP 不需要适配器包，但不提供自动 Context 准备、Capture 或 Flush。参见
+[配置 Pydantic AI](../how-to/configure-pydantic-ai.md)。
 ## LangGraph 适配器
 
 `powercontext-langgraph` 通过公开的 Python Client 把 LangGraph 图连接到运行中的 Server，提供三个组件：
@@ -77,6 +85,14 @@ Codex、Claude Code 和 DeepSeek Harness 插件使用的 `POWERCONTEXT_*_AUTHORI
 Server 不可用时图仍能到达终点，工具返回一段简短的不可用字符串。本次发布只覆盖 Memory 读写和有界召回；自动采集、
 checkpointing 和 Handoff 不在范围内。适配器有意不实现 `BaseStore`——Memory 模型不提供其所需的按 key 读取、upsert
 和删除操作。它不会启动或内嵌 Server。
+
+## LangChain middleware
+
+`PowerContextMiddleware` 使用 LangChain 的 `AgentMiddleware` API。它在不修改 agent state 的前提下，把一份有界
+PreparedContext 注入每个当前模型请求。自动采集默认关闭；显式传入 `auto_capture=True` 后，运行成功时会把最新用户消息
+和最终的纯文本或 structured answer 采集为 Content Source 证据。Source-to-Memory 激活仍由 Server 负责。召回和采集
+都会失败开放，且都不会启动或内嵌 Server。它由独立的 `powercontext-langchain` 包分发；LangGraph 适配器仍是单独的
+节点与工具集成。
 
 ## Pi package
 
@@ -188,19 +204,39 @@ Experience Revision 仍不会进入 PreparedContext。
 
 ## 后台 Experience 孵化
 
-Scheduler 只接收 metadata 含 `"kind": "task-outcome"` 的 Content Source，使用独立的持久化 cursor，并创建
-pending Experience Candidate。Candidate 写入和 cursor 推进在同一事务提交。该 job 不会批准内容，也不会把 pending
-内容放入 `PreparedContext`。设置与验证步骤见[创建并审核 Experience](../how-to/create-and-review-experience.md)。
+Integration 可以把已完成任务采集为 metadata 含 `"kind": "task-outcome"` 的 Content Source。启用
+Experience schedule 后，APScheduler 会扫描有上限的 Source window，并让配置好的 schema-bound pipeline
+生成可复用的 situation、action、outcome 和 lesson。每条 proposal 都引用精确 Source，并以 pending
+Experience Candidate 进入 Review Inbox。
 
-## 把 managed Skill 导出给 Codex
+Experience 孵化使用独立于 Memory extraction 的持久化 Source cursor。Candidate 写入和 cursor 推进会在同一
+事务提交；generation 或写入失败时，该 window 保留给下次重试。普通 Prompt Source 不是 Task Outcome，
+不会进入这个 job。
 
-批准会创建不可变的 Skill Revision，但不会安装 Skill 或授予执行权限。Codex exporter 将 `SKILL.md` 和
-`powercontext.json` 写入新的目标目录，并拒绝覆盖已有目录。Manifest 将 projection 绑定到一个精确 Artifact Revision
-及其渲染内容哈希。操作步骤见[创建并导出 managed Skill](../how-to/create-and-export-skill.md)。
+后台流程止于审核边界：它不会批准 Experience、把 pending 内容放入 PreparedContext、派生 managed Skill、
+把 Skill 导出到 Agent target，或执行 instructions。只有支撑它的 Experience 获批后，Skill authoring 和导出才作为
+显式步骤继续。
+设置与验证步骤见[创建并审核 Experience](../how-to/create-and-review-experience.md)。
+
+## 把 managed Skill 导出到 Agent target
+
+配置好的生成器可通过 `generate_skill` 生成完整 managed Skill；已经拥有完整类型化内容的人或 integration
+可通过 `propose_skill` 提交。proposal 包括名称、用于发现的描述、instructions、validation，以及精确的
+Source 或 Artifact lineage。在 reviewer 批准精确 Candidate version 之前，它始终只是 Candidate。
+
+批准会创建不可变的 Skill Revision，但不会安装 Skill，也不会授予执行权限。要让 Codex 或 Claude Code 使用某个
+已批准 Revision，必须把它显式发布到配置好的代码库级、用户级或插件级 Skill target。projection 会生成
+`SKILL.md` 和 `powercontext.json`；manifest 会记录 Agent kind、精确 Artifact 引用和渲染内容哈希。目标目录已存在时会
+拒绝覆盖，更新必须是一次明确的新导出，不能静默替换。
+
+Codex 可以发现 `.agents/skills/<name>/SKILL.md` 下的代码库级导出。Artifact Revision 始终是内容权威，目录
+只是 host-local projection；Claude Code 对应的项目级 target 是 `.claude/skills/<name>/SKILL.md`。两者都可以从
+同一个精确 Revision 重建。
+操作步骤见[创建并导出 managed Skill](../how-to/create-and-export-skill.md)。
 
 ## 外部 Agent-native Skill
 
-外部 Skill 的原始本地 package 始终是内容权威。显式配置 Codex roots 后，Server 可以扫描 scope-local、
+外部 Skill 的原始本地 package 始终是内容权威。显式配置 Agent target 后，Server 可以扫描 scope-local、
 可重建的 Registry，并记录名称、描述、provider、Agent kind、host、installation scope、locator 和整个 package
 的 fingerprint。只有同一 package 在已配置 host 上仍可读且 fingerprint 一致时，exact resolve 才成功；它不会
 安装 package，也不会回退到其他版本。
@@ -216,8 +252,8 @@ Discovery 不进入 Review。显式调用 `import_external_skill` 并提供精�
 | --- | --- | --- | --- | --- |
 | 外部 Agent-native Skill | 原始 package | scan/list/resolve 不需要；import/fork 需要 | discovery 不需要；import/fork 后需要 | host-local Registry 和 exact resolve |
 | Experience | 精确 approved Artifact Revision | generate/evolve 需要；类型化 `propose` 不需要 | 需要 | exact read 与 PreparedContext approved-head FTS recall |
-| managed Skill | 精确 approved Artifact Revision | generate/evolve/import/fork 需要；类型化 `propose` 不需要 | 需要 | exact read 与显式 Codex projection |
-| Codex projection | 对应的 managed Skill Revision | 不需要 | 不增加额外 Review | 可重建的 host-local copy |
+| managed Skill | 精确 approved Artifact Revision | generate/evolve/import/fork 需要；类型化 `propose` 不需要 | 需要 | exact read 与显式 Agent projection |
+| Agent projection | 对应的 managed Skill Revision | 不需要 | 不增加额外 Review | 可重建的 Codex 或 Claude Code host-local copy |
 
 ## Core SDK
 

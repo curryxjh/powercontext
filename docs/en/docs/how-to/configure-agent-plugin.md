@@ -33,6 +33,32 @@ The package points compatible agents to:
 http://127.0.0.1:8000/mcp
 ```
 
+## Load it in VS Code
+
+VS Code supports local Agent Plugin directories through `chat.pluginLocations`.
+Use this procedure to verify that the package is loadable by a real Agent
+Plugin host:
+
+1. Open VS Code settings as JSON.
+2. Enable Agent Plugins and register the PowerContext package root:
+
+   ```json
+   {
+     "chat.plugins.enabled": true,
+     "chat.pluginLocations": {
+       "/absolute/path/to/powercontext/integrations/agent-plugin/powercontext": true
+     }
+   }
+   ```
+
+3. Reload VS Code.
+4. Confirm that the PowerContext plugin appears in the Agent Plugins view and
+   that the `project-context` skill and `powercontext` MCP server are available
+   to chat.
+
+The registered path must point at the package root that contains `plugin.json`,
+`mcp.json`, and `skills/`.
+
 The package does not start the Server, add MCP tools, or implement Runtime or
 Memory behavior. Memory search, writes, revisions, Handoff behavior, and
 persistence remain owned by the PowerContext Server and its existing MCP tools.

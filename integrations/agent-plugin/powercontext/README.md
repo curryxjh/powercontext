@@ -20,6 +20,22 @@ The default MCP endpoint is:
 http://127.0.0.1:8000/mcp
 ```
 
+For a verified local host-loading procedure, use an Agent Plugins client that
+supports local plugin directories. In VS Code, register this directory in
+`settings.json`:
+
+```json
+{
+  "chat.plugins.enabled": true,
+  "chat.pluginLocations": {
+    "/absolute/path/to/powercontext/integrations/agent-plugin/powercontext": true
+  }
+}
+```
+
+Reload the host and confirm that the `project-context` skill and `powercontext`
+MCP server are available.
+
 PowerContext authentication is deployment-specific. Agent Plugins 1.0.0 has no
 portable credential-reference field for remote MCP servers, so this package does
 not include static credentials or token placeholders in `mcp.json`. Configure

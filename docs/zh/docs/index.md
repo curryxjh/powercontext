@@ -1,26 +1,57 @@
 ---
-title: PowerContext 文档
-description: 安装 PowerContext、连接 Codex，并选择合适的集成方式。
+template: docs-overview.html
+title: 从一个项目开始
+description: 安装 PowerContext，验证跨会话上下文，再选择下一个任务。
+page_type: docs-overview
+overview:
+  intro: 先完成一次跨会话闭环。安装、参考和开发细节仍可通过文档导航访问。
+  sections:
+    - title: 让项目继续
+      description: 保存一个决定，在另一个会话中恢复它，或交接当前工作。
+      cards:
+        - title: Codex 快速入门
+          description: 安装本地 Server，保存一个项目决定，并在新会话中恢复它。
+          href: zh/docs/tutorials/codex-quickstart/
+        - title: 在 Claude Code 中继续
+          description: 让 Claude Code 和 Codex 打开同一份项目 Memory。
+          href: zh/docs/how-to/configure-claude-code/
+        - title: 在 Pi 中继续
+          description: 通过原生 package 在 Pi 中打开项目上下文。
+          href: zh/docs/how-to/configure-pi/
+        - title: 在 OpenClaw 中继续
+          description: 通过 memory 插件在 OpenClaw 中打开项目上下文。
+          href: zh/docs/how-to/configure-openclaw/
+        - title: 在 OpenCode 中继续
+          description: 通过原生 OpenCode 插件召回并维护项目上下文。
+          href: zh/docs/how-to/configure-opencode/
+        - title: 加载 Agent Plugin
+          description: 在兼容 Agent 中使用可复用的 PowerContext skills 和 MCP 配置。
+          href: zh/docs/how-to/configure-agent-plugin/
+        - title: 交接当前工作
+          description: 为另一个任务、会话或模型准备一份经过检查的 Handoff。
+          href: zh/docs/how-to/handoff-with-codex/
+    - title: 理解与运行
+      description: 判断什么需要保留，配置 Server，或排查无法工作的环境。
+      cards:
+        - title: Memory 与 Handoff
+          description: 了解哪些信息应该长期保留，哪些内容只需要临时交接。
+          href: zh/docs/explanation/memory-and-handoff/
+        - title: Experience 与 Skill 生命周期
+          description: 了解证据如何变成经过审核的 Artifact Revision，以及它何时可用。
+          href: zh/docs/explanation/experience-and-skill-lifecycle/
+        - title: 配置
+          description: 设置存储、provider、接口和运行行为。
+          href: zh/docs/reference/configuration/
+        - title: 审核 Candidate
+          description: 检查、修订、批准或拒绝待审核的 Experience 和 Skill 提案。
+          href: zh/docs/how-to/review-candidates/
+        - title: 创建 Experience
+          description: 根据精确证据生成 Experience，完成审核并验证 approved Revision。
+          href: zh/docs/how-to/create-and-review-experience/
+        - title: 创建 managed Skill
+          description: 生成并审核 managed Skill，再将一个精确 Revision 导出给 Codex。
+          href: zh/docs/how-to/create-and-export-skill/
+        - title: 排查问题
+          description: 诊断连接、配置和集成问题。
+          href: zh/docs/how-to/troubleshoot/
 ---
-
-# PowerContext 文档
-
-PowerContext 为 Agent 保存项目级上下文。它以本地或远程 Server 的形式运行，并通过 Codex、Claude Code、DeepSeek Harness、
-Python、HTTP 和 MCP 提供同一份持久化 Memory。
-
-如果你要为自己安装 PowerContext，请从 [Codex 快速入门](tutorials/codex-quickstart.md)开始。它会从
-Git 安装讲到第二个 Codex 会话如何恢复第一个会话的工作。
-
-## 使用 PowerContext
-
-- [安装和运行](how-to/install-and-run.md)：从 Git 安装、启动 Server 和更新版本。
-- [配置 Codex](how-to/configure-codex.md)：安装插件，并控制项目 scope 和提示词采集。
-- [配置 Claude Code](how-to/configure-claude-code.md)：安装插件，并与 Codex 共享项目 Memory。
-- [配置 DeepSeek Harness](how-to/configure-dsh.md)：安装 DSH 插件，并控制项目 scope 和提示词采集。
-- [配置 Agent Plugin](how-to/configure-agent-plugin.md)：在兼容 Agent 中加载可复用 skills 和 MCP configuration。
-- [排查问题](how-to/troubleshoot.md)：诊断凭据、插件、Server、数据库和 Hook。
-
-## 查询细节
-
-- [接口](reference/interfaces.md)：Codex、Claude Code、DeepSeek Harness、CLI、Client SDK、Core SDK、HTTP 和 MCP。
-- [配置](reference/configuration.md)：默认值和环境变量。

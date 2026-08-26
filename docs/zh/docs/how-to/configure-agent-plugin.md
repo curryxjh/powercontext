@@ -33,6 +33,29 @@ powercontext server run
 http://127.0.0.1:8000/mcp
 ```
 
+## 在 VS Code 中加载
+
+VS Code 支持通过 `chat.pluginLocations` 加载本地 Agent Plugin 目录。可以用
+下面的步骤验证这个 package 能被真实 Agent Plugin host 加载：
+
+1. 打开 VS Code 的 JSON settings。
+2. 启用 Agent Plugins，并注册 PowerContext package root：
+
+   ```json
+   {
+     "chat.plugins.enabled": true,
+     "chat.pluginLocations": {
+       "/absolute/path/to/powercontext/integrations/agent-plugin/powercontext": true
+     }
+   }
+   ```
+
+3. 重新加载 VS Code。
+4. 确认 PowerContext plugin 出现在 Agent Plugins view 中，并且 chat 可以使用
+   `project-context` skill 和 `powercontext` MCP server。
+
+注册路径必须指向包含 `plugin.json`、`mcp.json` 和 `skills/` 的 package root。
+
 该 package 不负责启动 Server，不新增 MCP tools，也不实现 Runtime 或 Memory
 行为。Memory search、writes、revisions、Handoff behavior 和 persistence 仍由
 PowerContext Server 及其现有 MCP tools 负责。
