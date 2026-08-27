@@ -8,10 +8,17 @@ storage, start the Server, add MCP tools, or implement Runtime or Memory
 behavior. Compatible agents load the skill instructions from `skills/` and map
 `mcp.json` to their native MCP configuration.
 
+Obtain the package from a source checkout:
+
+```bash
+git clone https://github.com/oceanbase/powercontext.git
+cd powercontext
+```
+
 Start a local Server before loading the package:
 
 ```bash
-powercontext server run
+uv run powercontext server run
 ```
 
 The default MCP endpoint is:
@@ -28,7 +35,7 @@ supports local plugin directories. In VS Code, register this directory in
 {
   "chat.plugins.enabled": true,
   "chat.pluginLocations": {
-    "/absolute/path/to/powercontext/integrations/agent-plugin/powercontext": true
+    "/absolute/path/to/cloned/powercontext/integrations/agent-plugin/powercontext": true
   }
 }
 ```

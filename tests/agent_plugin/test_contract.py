@@ -117,7 +117,8 @@ def test_project_context_skill_uses_default_model_free_handoff_flow() -> None:
 def test_agent_plugin_readme_documents_server_and_auth_boundaries() -> None:
     content = (PLUGIN_ROOT / "README.md").read_text(encoding="utf-8")
 
-    assert "powercontext server run" in content
+    assert "git clone https://github.com/oceanbase/powercontext.git" in content
+    assert "uv run powercontext server run" in content
     assert "http://127.0.0.1:8000/mcp" in content
     assert "chat.pluginLocations" in content
     assert "static credentials" in content
@@ -133,6 +134,32 @@ def test_agent_plugin_docs_include_verified_host_loading_procedure() -> None:
         content = (REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
 
         assert "VS Code" in content
+        assert "git clone https://github.com/oceanbase/powercontext.git" in content
+        assert "uv run powercontext server run" in content
         assert "chat.plugins.enabled" in content
         assert "chat.pluginLocations" in content
-        assert "/absolute/path/to/powercontext/integrations/agent-plugin/powercontext" in content
+        assert "/absolute/path/to/cloned/powercontext/integrations/agent-plugin/powercontext" in content
+
+
+def test_docs_overview_keeps_existing_cards_and_agent_plugin_card_aligned() -> None:
+    expected_cards = {
+        "en": (
+            "Continue in OpenClaw",
+            "Continue in OpenCode",
+            "Load an Agent Plugin",
+            "en/docs/how-to/configure-agent-plugin/",
+        ),
+        "zh": (
+            "在 OpenClaw 中继续",
+            "在 OpenCode 中继续",
+            "加载 Agent Plugin",
+            "zh/docs/how-to/configure-agent-plugin/",
+        ),
+    }
+
+    for locale, fragments in expected_cards.items():
+        content = (REPOSITORY_ROOT / f"docs/{locale}/docs/index.md").read_text(encoding="utf-8")
+
+        assert "template: docs-overview.html" in content
+        for fragment in fragments:
+            assert fragment in content

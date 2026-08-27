@@ -8,7 +8,14 @@ description: 在兼容 Agent 中加载可复用的 PowerContext skills 和 MCP c
 PowerContext 提供一个可移植的 Agent Plugin package，供能够加载 Agent
 Plugin skills 和 MCP configuration 的 Agent 使用。
 
-该 package 位于仓库：
+先 clone 仓库，或使用一个已经包含集成 package 的源码 checkout：
+
+```bash
+git clone https://github.com/oceanbase/powercontext.git
+cd powercontext
+```
+
+package root 为：
 
 ```text
 integrations/agent-plugin/powercontext/
@@ -24,7 +31,7 @@ integrations/agent-plugin/powercontext/
 加载 package 前，先启动 PowerContext Server：
 
 ```bash
-powercontext server run
+uv run powercontext server run
 ```
 
 该 package 默认让兼容 Agent 连接：
@@ -45,7 +52,7 @@ VS Code 支持通过 `chat.pluginLocations` 加载本地 Agent Plugin 目录。�
    {
      "chat.plugins.enabled": true,
      "chat.pluginLocations": {
-       "/absolute/path/to/powercontext/integrations/agent-plugin/powercontext": true
+       "/absolute/path/to/cloned/powercontext/integrations/agent-plugin/powercontext": true
      }
    }
    ```

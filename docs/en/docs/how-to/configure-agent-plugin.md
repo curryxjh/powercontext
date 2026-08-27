@@ -8,7 +8,15 @@ description: Load reusable PowerContext skills and MCP configuration in compatib
 PowerContext provides a portable Agent Plugin package for agents that can load
 Agent Plugin skills and MCP configuration.
 
-The package lives in the repository at:
+Clone the repository or use an existing source checkout that contains the
+integration package:
+
+```bash
+git clone https://github.com/oceanbase/powercontext.git
+cd powercontext
+```
+
+The package root is:
 
 ```text
 integrations/agent-plugin/powercontext/
@@ -24,7 +32,7 @@ It contains:
 Start a PowerContext Server before loading the package:
 
 ```bash
-powercontext server run
+uv run powercontext server run
 ```
 
 The package points compatible agents to:
@@ -46,7 +54,7 @@ Plugin host:
    {
      "chat.plugins.enabled": true,
      "chat.pluginLocations": {
-       "/absolute/path/to/powercontext/integrations/agent-plugin/powercontext": true
+       "/absolute/path/to/cloned/powercontext/integrations/agent-plugin/powercontext": true
      }
    }
    ```
