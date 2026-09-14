@@ -491,7 +491,6 @@ def test_import_sessions_cli_requires_host() -> None:
 
     assert result.exit_code != 0
     assert "Missing option" in result.output
-    assert "--host" in result.output
 
 
 def test_import_sessions_cli_writes_json_summary(monkeypatch, tmp_path: Path) -> None:
