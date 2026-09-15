@@ -64,6 +64,13 @@ class SessionImportError(RuntimeError):
     def invalid_codex_record(cls, session_file: Path, line_number: int) -> SessionImportError:
         return cls(f"invalid Codex session record in {session_file} line {line_number}")
 
+    @classmethod
+    def stalled_flush(cls, scope_id: str, target_position: int, current_cursor: int) -> SessionImportError:
+        return cls(
+            f"memory flush for Scope {scope_id} stopped at cursor {current_cursor} before imported Source "
+            f"position {target_position}"
+        )
+
 
 class SessionImportClient(Protocol):
     """Client surface needed by session importers."""
@@ -112,6 +119,7 @@ class SessionImportItemResult:
     session_file: str
     line_number: int
     scope_id: str | None = None
+    position: int | None = None
 
     def as_json(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -123,6 +131,8 @@ class SessionImportItemResult:
             payload["source_id"] = self.source_id
         if self.scope_id is not None:
             payload["scope_id"] = self.scope_id
+        if self.position is not None:
+            payload["position"] = self.position
         if self.reason is not None:
             payload["reason"] = self.reason
         return payload
@@ -175,7 +185,7 @@ class SessionImportResult:
 class _PromptProcessingResult:
     item: SessionImportItemResult
     imported: bool = False
-    touched_scope_id: str | None = None
+    pending_flush: tuple[str, int] | None = None
 
 
 async def import_sessions(
@@ -201,12 +211,13 @@ async def import_sessions(
     skipped_by_reason: dict[str, int] = {}
     failed_by_reason: dict[str, int] = {}
     items: list[SessionImportItemResult] = []
-    touched_scopes: set[str] = set()
+    pending_flush_positions: dict[str, int] = {}
     for prompt in read_result.prompts:
         processed = await _process_prompt(
             client,
             prompt,
             scope_id=scope_id,
+            codex_home=codex_home,
             checkpoint=checkpoint,
             checkpoint_file=checkpoint_file,
             dry_run=dry_run,
@@ -219,13 +230,15 @@ async def import_sessions(
             _count_skip(failed_by_reason, item.reason)
         if processed.imported:
             imported += 1
-        if processed.touched_scope_id is not None:
-            touched_scopes.add(processed.touched_scope_id)
-    flushed_scopes: list[str] = []
+        if processed.pending_flush is not None:
+            pending_scope_id, pending_position = processed.pending_flush
+            pending_flush_positions[pending_scope_id] = max(
+                pending_position,
+                pending_flush_positions.get(pending_scope_id, 0),
+            )
+    flushed_scopes: tuple[str, ...] = ()
     if flush and not dry_run:
-        for resolved_scope_id in sorted(touched_scopes):
-            await client.flush_memory(FlushMemoryRequest(scope_id=resolved_scope_id))
-            flushed_scopes.append(resolved_scope_id)
+        flushed_scopes = await _flush_scopes_through(client, pending_flush_positions)
     return SessionImportResult(
         host=host,
         scanned_files=read_result.scanned_files,
@@ -238,7 +251,7 @@ async def import_sessions(
         failed_by_reason=failed_by_reason,
         checkpoint_file=None if dry_run else str(checkpoint_file),
         items=tuple(items),
-        flushed_scopes=tuple(flushed_scopes),
+        flushed_scopes=flushed_scopes,
     )
 
 
@@ -247,11 +260,12 @@ async def _process_prompt(
     prompt: ImportedPrompt,
     *,
     scope_id: str | None,
+    codex_home: Path,
     checkpoint: dict[str, object],
     checkpoint_file: Path,
     dry_run: bool,
 ) -> _PromptProcessingResult:
-    content = redact_known_secrets(prompt.content).strip()
+    content = redact_known_secrets(prompt.content, codex_home=codex_home).strip()
     if not content:
         return _PromptProcessingResult(
             _item_result(prompt, SessionImportItemStatus.SKIPPED, reason="empty_after_redaction")
@@ -262,6 +276,7 @@ async def _process_prompt(
     if resolved_scope_id is None:
         return _PromptProcessingResult(_item_result(prompt, SessionImportItemStatus.SKIPPED, reason="unresolved_scope"))
     source_id = prompt.source_id_for_scope(resolved_scope_id)
+    checkpoint_position = _checkpoint_position(checkpoint, source_id)
     if _checkpoint_status(checkpoint, source_id) == SessionImportItemStatus.ACCEPTED.value:
         return _PromptProcessingResult(
             _item_result(
@@ -269,17 +284,18 @@ async def _process_prompt(
                 SessionImportItemStatus.SKIPPED,
                 source_id=source_id,
                 scope_id=resolved_scope_id,
+                position=checkpoint_position,
                 reason="checkpoint_accepted",
-            )
+            ),
+            pending_flush=None if checkpoint_position is None else (resolved_scope_id, checkpoint_position),
         )
     if dry_run:
         return _PromptProcessingResult(
             _item_result(prompt, SessionImportItemStatus.ACCEPTED, source_id=source_id, scope_id=resolved_scope_id),
             imported=True,
-            touched_scope_id=resolved_scope_id,
         )
     try:
-        await client.capture_content_source(
+        captured = await client.capture_content_source(
             CaptureContentSourceRequest(
                 scope_id=resolved_scope_id,
                 source_id=source_id,
@@ -287,7 +303,18 @@ async def _process_prompt(
                 metadata=_metadata(prompt),
             )
         )
-    except ClientError:
+    except ClientError as error:
+        if _is_redacted_source_conflict(error, prompt, content):
+            skipped = _item_result(
+                prompt,
+                SessionImportItemStatus.SKIPPED,
+                source_id=source_id,
+                scope_id=resolved_scope_id,
+                reason="redaction_conflict",
+            )
+            _record_checkpoint(checkpoint, skipped)
+            _save_checkpoint(checkpoint_file, checkpoint)
+            return _PromptProcessingResult(skipped)
         failed = _item_result(
             prompt,
             SessionImportItemStatus.FAILED,
@@ -298,10 +325,41 @@ async def _process_prompt(
         _record_checkpoint(checkpoint, failed)
         _save_checkpoint(checkpoint_file, checkpoint)
         return _PromptProcessingResult(failed)
-    accepted = _item_result(prompt, SessionImportItemStatus.ACCEPTED, source_id=source_id, scope_id=resolved_scope_id)
+    accepted = _item_result(
+        prompt,
+        SessionImportItemStatus.ACCEPTED,
+        source_id=source_id,
+        scope_id=resolved_scope_id,
+        position=captured.position,
+    )
     _record_checkpoint(checkpoint, accepted)
     _save_checkpoint(checkpoint_file, checkpoint)
-    return _PromptProcessingResult(accepted, imported=True, touched_scope_id=resolved_scope_id)
+    return _PromptProcessingResult(accepted, imported=True, pending_flush=(resolved_scope_id, captured.position))
+
+
+def _is_redacted_source_conflict(error: ClientError, prompt: ImportedPrompt, content: str) -> bool:
+    return (
+        isinstance(error, ServerResponseError)
+        and error.status_code == 409
+        and error.code == "source_conflict"
+        and content != prompt.content
+    )
+
+
+async def _flush_scopes_through(
+    client: SessionImportClient,
+    pending_flush_positions: Mapping[str, int],
+) -> tuple[str, ...]:
+    flushed_scopes: list[str] = []
+    for scope_id, target_position in sorted(pending_flush_positions.items()):
+        current_cursor = 0
+        while current_cursor < target_position:
+            flushed = await client.flush_memory(FlushMemoryRequest(scope_id=scope_id))
+            if flushed.current_cursor <= current_cursor:
+                raise SessionImportError.stalled_flush(scope_id, target_position, flushed.current_cursor)
+            current_cursor = flushed.current_cursor
+        flushed_scopes.append(scope_id)
+    return tuple(flushed_scopes)
 
 
 def read_codex_prompts(*, codex_home: Path | None = None) -> CodexPromptReadResult:
@@ -327,6 +385,7 @@ def read_codex_prompts(*, codex_home: Path | None = None) -> CodexPromptReadResu
 
 def _read_codex_session_file(session_file: Path, *, session_root: Path) -> tuple[ImportedPrompt, ...]:
     session_id: str | None = None
+    turn_id: str | None = None
     cwd: str | None = None
     environment_cwd: str | None = None
     relative_session_file = _relative_session_file(session_file, session_root)
@@ -335,36 +394,44 @@ def _read_codex_session_file(session_file: Path, *, session_root: Path) -> tuple
         stream = session_file.open(encoding="utf-8")
     except OSError as error:
         raise SessionImportError.unreadable_codex_session(session_file) from error
-    with stream:
-        for line_number, line in enumerate(stream, start=1):
-            record = _read_codex_record(line, session_file=session_file, line_number=line_number)
-            if record is None:
-                continue
-            payload = record.get("payload")
-            if not isinstance(payload, dict):
-                continue
-            typed_payload = cast(dict[str, object], payload)
-            if record.get("type") == "session_meta":
-                session_id = _string(typed_payload.get("session_id")) or _string(typed_payload.get("id")) or session_id
-                cwd = _string(typed_payload.get("cwd")) or cwd
-                continue
-            if record.get("type") == "turn_context":
-                cwd = _string(typed_payload.get("cwd")) or cwd
-                continue
-            environment_cwd = _environment_cwd_from_record(record, typed_payload) or environment_cwd
-            prompt = _prompt_from_codex_record(
-                record,
-                typed_payload,
-                session_file=session_file,
-                relative_session_file=relative_session_file,
-                line_number=line_number,
-                prompt_index=len(prompts),
-                cwd=cwd or environment_cwd,
-                session_id=session_id,
-            )
-            if prompt is None:
-                continue
-            prompts.append(prompt)
+    try:
+        with stream:
+            for line_number, line in enumerate(stream, start=1):
+                record = _read_codex_record(line, session_file=session_file, line_number=line_number)
+                if record is None:
+                    continue
+                payload = record.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                typed_payload = cast(dict[str, object], payload)
+                record_type = record.get("type")
+                if record_type == "session_meta":
+                    session_id = (
+                        _string(typed_payload.get("session_id")) or _string(typed_payload.get("id")) or session_id
+                    )
+                    cwd = _string(typed_payload.get("cwd")) or cwd
+                    continue
+                if record_type in {"turn_context", "task_started"}:
+                    turn_id = _record_turn_id(record, typed_payload) or turn_id
+                    cwd = _string(typed_payload.get("cwd")) or cwd
+                    continue
+                environment_cwd = _environment_cwd_from_record(record, typed_payload) or environment_cwd
+                prompt = _prompt_from_codex_record(
+                    record,
+                    typed_payload,
+                    session_file=session_file,
+                    relative_session_file=relative_session_file,
+                    line_number=line_number,
+                    prompt_index=len(prompts),
+                    cwd=cwd or environment_cwd,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                )
+                if prompt is None:
+                    continue
+                prompts.append(prompt)
+    except UnicodeDecodeError as error:
+        raise SessionImportError.unreadable_codex_session(session_file) from error
     return tuple(prompts)
 
 
@@ -390,6 +457,7 @@ def _prompt_from_codex_record(
     prompt_index: int,
     cwd: str | None,
     session_id: str | None,
+    turn_id: str | None,
 ) -> ImportedPrompt | None:
     if record.get("type") != "response_item" or payload.get("type") != "message" or payload.get("role") != "user":
         return None
@@ -406,7 +474,7 @@ def _prompt_from_codex_record(
         content=content,
         cwd=cwd,
         session_id=session_id,
-        turn_id=_codex_turn_id(payload),
+        turn_id=_codex_turn_id(payload) or turn_id,
         timestamp=_string(record.get("timestamp")),
     )
 
@@ -439,12 +507,14 @@ def _item_result(
     *,
     source_id: str | None = None,
     scope_id: str | None = None,
+    position: int | None = None,
     reason: str | None = None,
 ) -> SessionImportItemResult:
     return SessionImportItemResult(
         status=status,
         source_id=source_id,
         scope_id=scope_id,
+        position=position,
         reason=reason,
         session_file=prompt.relative_session_file,
         line_number=prompt.line_number,
@@ -490,6 +560,17 @@ def _checkpoint_status(checkpoint: Mapping[str, object], source_id: str) -> str 
         return None
     status = item.get("status")
     return status if isinstance(status, str) else None
+
+
+def _checkpoint_position(checkpoint: Mapping[str, object], source_id: str) -> int | None:
+    items = checkpoint.get("items")
+    if not isinstance(items, Mapping):
+        return None
+    item = items.get(source_id)
+    if not isinstance(item, Mapping):
+        return None
+    position = item.get("position")
+    return position if isinstance(position, int) and position >= 1 else None
 
 
 def _record_checkpoint(checkpoint: dict[str, object], result: SessionImportItemResult) -> None:
@@ -571,9 +652,25 @@ def _codex_turn_id(payload: Mapping[str, object]) -> str | None:
     return None
 
 
+def _record_turn_id(record: Mapping[str, object], payload: Mapping[str, object]) -> str | None:
+    return _payload_identifier(payload, "turn_id", "request_id", "id") or _payload_identifier(
+        record, "turn_id", "request_id"
+    )
+
+
+def _payload_identifier(payload: Mapping[str, object], *keys: str) -> str | None:
+    for key in keys:
+        value = _string(payload.get(key))
+        if value:
+            return value
+    return None
+
+
 def _is_synthetic_codex_user_message(content: str) -> bool:
     stripped = content.strip()
-    return stripped.startswith("<environment_context>") and stripped.endswith("</environment_context>")
+    return (
+        stripped.startswith("<environment_context>") and stripped.endswith("</environment_context>")
+    ) or stripped.startswith("# AGENTS.md instructions")
 
 
 def _environment_cwd_from_record(record: Mapping[str, object], payload: Mapping[str, object]) -> str | None:

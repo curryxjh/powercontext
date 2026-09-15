@@ -18,12 +18,18 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
 from typer.testing import CliRunner
 
 import powercontext.client.cli as client_cli
 from powercontext.cli.app import create_cli
 from powercontext.client.errors import ServerResponseError
-from powercontext.client.session_import import SessionImportResult, import_sessions, read_codex_prompts
+from powercontext.client.session_import import (
+    SessionImportError,
+    SessionImportResult,
+    import_sessions,
+    read_codex_prompts,
+)
 from powercontext.http import (
     CaptureContentSourceResponse,
     CaptureStatus,
@@ -184,6 +190,39 @@ def test_import_sessions_resolves_scope_captures_sources_and_flushes(tmp_path: P
     assert client.flush_requests == ["scope-a"]
 
 
+def test_import_sessions_redacts_auth_from_selected_codex_home(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    secret = "codex-home-token-value"  # noqa: S105 - synthetic redaction sentinel.
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text(json.dumps({"tokens": {"access_token": secret}}), encoding="utf-8")
+    session_dir = codex_home / "sessions"
+    session_dir.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_jsonl(
+        session_dir / "rollout.jsonl",
+        [
+            {"ordinal": 0, "type": "session_meta", "payload": {"cwd": str(workspace)}},
+            {
+                "ordinal": 1,
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": f"token is {secret}"}],
+                },
+            },
+        ],
+    )
+    client = _ImportClient()
+
+    _run(import_sessions(client, host="codex", codex_home=codex_home))
+
+    assert secret not in client.capture_requests[0].content
+    assert client.capture_requests[0].content == "token is [REDACTED]"
+
+
 def test_import_sessions_dry_run_does_not_write_sources(tmp_path: Path) -> None:
     codex_home = tmp_path / "codex"
     session_dir = codex_home / "sessions"
@@ -282,6 +321,80 @@ def test_import_sessions_uses_live_hook_source_identity(tmp_path: Path) -> None:
     }
 
 
+def test_codex_reader_recovers_turn_ids_from_turn_context_and_task_started(tmp_path: Path) -> None:
+    codex_home = tmp_path / "codex"
+    session_dir = codex_home / "sessions"
+    session_dir.mkdir(parents=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_jsonl(
+        session_dir / "rollout.jsonl",
+        [
+            {"ordinal": 0, "type": "session_meta", "payload": {"session_id": "session-a", "cwd": str(workspace)}},
+            {"ordinal": 1, "type": "turn_context", "payload": {"turn_id": "turn-a", "cwd": str(workspace)}},
+            {
+                "ordinal": 2,
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "same"}]},
+            },
+            {"ordinal": 3, "type": "task_started", "payload": {"request_id": "turn-b"}},
+            {
+                "ordinal": 4,
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "same"}]},
+            },
+        ],
+    )
+
+    read_result = read_codex_prompts(codex_home=codex_home)
+
+    assert [prompt.turn_id for prompt in read_result.prompts] == ["turn-a", "turn-b"]
+    assert read_result.prompts[0].source_id_for_scope("scope-a") != read_result.prompts[1].source_id_for_scope(
+        "scope-a"
+    )
+
+
+def test_codex_reader_skips_injected_agents_context_messages(tmp_path: Path) -> None:
+    codex_home = tmp_path / "codex"
+    session_dir = codex_home / "sessions"
+    session_dir.mkdir(parents=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_jsonl(
+        session_dir / "rollout.jsonl",
+        [
+            {"ordinal": 0, "type": "session_meta", "payload": {"cwd": str(workspace)}},
+            {
+                "ordinal": 1,
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "# AGENTS.md instructions for /repo\n\n<environment_context>...</environment_context>",
+                        }
+                    ],
+                },
+            },
+            {
+                "ordinal": 2,
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "real prompt"}],
+                },
+            },
+        ],
+    )
+
+    read_result = read_codex_prompts(codex_home=codex_home)
+
+    assert [prompt.content for prompt in read_result.prompts] == ["real prompt"]
+
+
 def test_import_sessions_overlaps_with_live_capture_without_conflict(tmp_path: Path) -> None:
     codex_home = tmp_path / "codex"
     session_dir = codex_home / "sessions"
@@ -333,6 +446,63 @@ def test_import_sessions_overlaps_with_live_capture_without_conflict(tmp_path: P
     assert client.capture_requests[0].source_id == source_id
 
 
+def test_import_sessions_skips_redaction_conflict_with_existing_live_capture(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("POWERCONTEXT_TEST_TOKEN", "RAW_SECRET")
+    codex_home = tmp_path / "codex"
+    session_dir = codex_home / "sessions"
+    session_dir.mkdir(parents=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_jsonl(
+        session_dir / "rollout.jsonl",
+        [
+            {
+                "ordinal": 0,
+                "type": "session_meta",
+                "payload": {"session_id": "session-a", "cwd": str(workspace)},
+            },
+            {
+                "ordinal": 1,
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "RAW_SECRET"}],
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-a"},
+                },
+            },
+        ],
+    )
+    checkpoint = tmp_path / "checkpoint.json"
+    source_id = _live_hook_source_id("scope-a", "session-a", "turn-a", "RAW_SECRET")
+    client = _ImportClient(
+        stored_sources={
+            source_id: {
+                "content": "RAW_SECRET",
+                "metadata": {
+                    "origin": "codex",
+                    "event": "user_prompt_submit",
+                    "cwd": str(workspace),
+                    "session_id": "session-a",
+                    "turn_id": "turn-a",
+                },
+                "position": 1,
+            }
+        }
+    )
+
+    result = _run(import_sessions(client, host="codex", codex_home=codex_home, checkpoint_file=checkpoint))
+
+    assert result.imported == 0
+    assert result.failed == 0
+    assert result.skipped_by_reason == {"redaction_conflict": 1}
+    assert client.capture_requests[0].source_id == source_id
+    assert client.capture_requests[0].content == "[REDACTED]"
+    saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert next(iter(saved["items"].values()))["status"] == "skipped"
+    assert next(iter(saved["items"].values()))["reason"] == "redaction_conflict"
+
+
 def test_import_sessions_checkpoint_skips_already_accepted_items(tmp_path: Path) -> None:
     codex_home = tmp_path / "codex"
     session_dir = codex_home / "sessions"
@@ -364,7 +534,7 @@ def test_import_sessions_checkpoint_skips_already_accepted_items(tmp_path: Path)
     assert next(iter(saved["items"].values()))["status"] == "accepted"
 
 
-def test_import_sessions_does_not_flush_checkpoint_skips(tmp_path: Path) -> None:
+def test_import_sessions_flushes_checkpoint_accepted_positions(tmp_path: Path) -> None:
     codex_home = tmp_path / "codex"
     session_dir = codex_home / "sessions"
     session_dir.mkdir(parents=True)
@@ -391,7 +561,68 @@ def test_import_sessions_does_not_flush_checkpoint_skips(tmp_path: Path) -> None
     )
 
     assert second.skipped_by_reason == {"checkpoint_accepted": 1}
-    assert second_client.flush_requests == []
+    assert second_client.capture_requests == []
+    assert second_client.flush_requests == ["scope-a"]
+    assert second.flushed_scopes == ("scope-a",)
+
+
+def test_import_sessions_flushes_until_highest_imported_position(tmp_path: Path) -> None:
+    codex_home = tmp_path / "codex"
+    session_dir = codex_home / "sessions"
+    session_dir.mkdir(parents=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_jsonl(
+        session_dir / "rollout.jsonl",
+        [
+            {"ordinal": 0, "type": "session_meta", "payload": {"cwd": str(workspace)}},
+            {
+                "ordinal": 1,
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "first"}]},
+            },
+            {
+                "ordinal": 2,
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "second"}]},
+            },
+            {
+                "ordinal": 3,
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "third"}]},
+            },
+        ],
+    )
+    client = _ImportClient(flush_window_limit=2)
+
+    result = _run(import_sessions(client, host="codex", codex_home=codex_home, flush=True))
+
+    assert result.imported == 3
+    assert result.flushed_scopes == ("scope-a",)
+    assert client.flush_requests == ["scope-a", "scope-a"]
+
+
+def test_import_sessions_reports_stalled_flush(tmp_path: Path) -> None:
+    codex_home = tmp_path / "codex"
+    session_dir = codex_home / "sessions"
+    session_dir.mkdir(parents=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_jsonl(
+        session_dir / "rollout.jsonl",
+        [
+            {"ordinal": 0, "type": "session_meta", "payload": {"cwd": str(workspace)}},
+            {
+                "ordinal": 1,
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "first"}]},
+            },
+        ],
+    )
+    client = _ImportClient(flush_window_limit=0)
+
+    with pytest.raises(SessionImportError, match="stopped at cursor 0 before imported Source position 1"):
+        _run(import_sessions(client, host="codex", codex_home=codex_home, flush=True))
 
 
 def test_import_sessions_records_failed_items_in_checkpoint(tmp_path: Path) -> None:
@@ -486,6 +717,32 @@ def test_codex_reader_counts_bad_session_files_and_continues(tmp_path: Path) -> 
     assert [prompt.content for prompt in read_result.prompts] == ["good"]
 
 
+def test_codex_reader_counts_invalid_utf8_session_files_and_continues(tmp_path: Path) -> None:
+    codex_home = tmp_path / "codex"
+    session_dir = codex_home / "sessions"
+    session_dir.mkdir(parents=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (session_dir / "bad.jsonl").write_bytes(b"\xff\n")
+    _write_jsonl(
+        session_dir / "good.jsonl",
+        [
+            {"ordinal": 0, "type": "session_meta", "payload": {"cwd": str(workspace)}},
+            {
+                "ordinal": 1,
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "good"}]},
+            },
+        ],
+    )
+
+    read_result = read_codex_prompts(codex_home=codex_home)
+
+    assert read_result.scanned_files == 2
+    assert read_result.failed_files == 1
+    assert [prompt.content for prompt in read_result.prompts] == ["good"]
+
+
 def test_import_sessions_cli_requires_host() -> None:
     result = CliRunner().invoke(create_cli([]), ["import-sessions", "--dry-run"])
 
@@ -556,10 +813,13 @@ class _ImportClient:
         resolve_error: ServerResponseError | None = None,
         capture_error: ServerResponseError | None = None,
         stored_sources: dict[str, dict[str, object]] | None = None,
+        flush_window_limit: int = 1,
     ) -> None:
         self.resolve_error = resolve_error
         self.capture_error = capture_error
         self.stored_sources = stored_sources or {}
+        self.flush_window_limit = flush_window_limit
+        self.flush_cursors: dict[str, int] = {}
         self.resolve_scope_requests: list[Any] = []
         self.capture_requests: list[Any] = []
         self.flush_requests: list[str] = []
@@ -592,20 +852,29 @@ class _ImportClient:
                 source=SourceReference(name="content", source_id=request.source_id),
                 position=position,
             )
+        position = len(self.stored_sources) + 1
+        self.stored_sources[request.source_id] = {
+            "content": request.content,
+            "metadata": request.metadata,
+            "position": position,
+        }
         return CaptureContentSourceResponse(
             status=CaptureStatus.ACCEPTED,
             source=SourceReference(name="content", source_id=request.source_id),
-            position=len(self.capture_requests),
+            position=position,
         )
 
     async def flush_memory(self, request: Any) -> FlushMemoryResponse:
         self.flush_requests.append(request.scope_id)
+        previous_cursor = self.flush_cursors.get(request.scope_id, 0)
+        current_cursor = previous_cursor + self.flush_window_limit
+        self.flush_cursors[request.scope_id] = current_cursor
         return FlushMemoryResponse(
             status=FlushStatus.PROCESSED,
-            previous_cursor=0,
-            current_cursor=1,
-            high_watermark=1,
-            processed_source_count=1,
+            previous_cursor=previous_cursor,
+            current_cursor=current_cursor,
+            high_watermark=current_cursor,
+            processed_source_count=self.flush_window_limit,
         )
 
 
