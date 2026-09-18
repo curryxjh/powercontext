@@ -19,6 +19,7 @@ import importlib
 import importlib.util
 import json
 import logging
+import re
 import sys
 import threading
 import types
@@ -26,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from jsonschema import ValidationError, validate
 
 HERMES_ROOT = Path(__file__).parents[2] / "integrations" / "hermes"
 _HERMES_MODULE_NAMES = (
@@ -259,7 +261,6 @@ def test_register_does_not_install_session_bound_slash_handlers(hermes_modules):
         def __init__(self):
             self.provider = None
             self.commands = {}
-            self.skills = {}
 
         def register_memory_provider(self, provider):
             self.provider = provider
@@ -267,15 +268,11 @@ def test_register_does_not_install_session_bound_slash_handlers(hermes_modules):
         def register_command(self, name, handler, **kwargs):
             self.commands[name] = (handler, kwargs)
 
-        def register_skill(self, name, path, description=None):
-            self.skills[name] = (path, description)
-
     context = Context()
     provider_module.register(context)
 
     assert context.provider is not None
     assert context.commands == {}
-    assert "powercontext" in context.skills
 
 
 def test_powercontext_subcommands_are_available_to_hermes_completer(hermes_modules, monkeypatch):
@@ -1306,6 +1303,17 @@ def test_http_client_forwards_authorization_and_preserves_access_denial(hermes_m
     assert caught.value.server_message == "scope access denied"
 
 
+def test_guidance_references_available_provider_tools_without_a_skill(hermes_modules) -> None:
+    plugin, _ = hermes_modules
+    provider = plugin.PowerContextMemoryProvider({})
+    guidance = provider.system_prompt_block()
+    tools = provider.get_tool_schemas()
+    names = {tool["name"] for tool in tools}
+    references = set(re.findall(r"\bpowercontext_[a-z_]+\b", guidance))
+    assert references <= names
+    assert references
+
+
 @pytest.mark.parametrize("saved_in_native_config", [True, False])
 def test_provider_uses_endpoint_bound_persisted_transport_consent(
     hermes_modules, monkeypatch, tmp_path, saved_in_native_config
@@ -1454,3 +1462,28 @@ def test_text_assembly_rejects_malformed_or_oversized_responses(provider_and_cli
     response.update(change)
     monkeypatch.setattr(client, "prepare_context", lambda *args, **kwargs: response)
     assert provider.prefetch("query") == ""
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"disposition": "in_progress"},
+        {"next_action": {"text": "Review examples", "citations": []}},
+    ],
+)
+def test_registered_handoff_schema_explains_valid_work_arguments(hermes_modules, invalid) -> None:
+    plugin, _ = hermes_modules
+    tools = plugin.PowerContextMemoryProvider({}).get_tool_schemas()
+    schema = next(tool["parameters"] for tool in tools if tool["name"] == "powercontext_handoff_current_work")
+    handoff = {
+        "schema": "powercontext.current-work-handoff.v1",
+        "trust": "untrusted_input",
+        "objective": "Document Aurora",
+        "disposition": "continuable",
+        "state": [{"text": "README complete", "basis": "declared", "evidence": []}],
+        "next_action": {"text": "Review examples", "basis": "declared", "evidence": []},
+        "omissions": [],
+    }
+    validate({"source_id": "aurora-boundary", "handoff": handoff}, schema)
+    with pytest.raises(ValidationError):
+        validate({"source_id": "aurora-boundary", "handoff": {**handoff, **invalid}}, schema)

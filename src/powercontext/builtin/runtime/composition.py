@@ -103,6 +103,7 @@ from powercontext.builtin.persistence.sqlite.topic_memory_index import (
     SQLiteTopicMemoryVectorIndex,
 )
 from powercontext.builtin.persistence.tables import BUILTIN_TABLES
+from powercontext.builtin.persistence.tag_schema import ensure_topic_memory_tag_schema
 from powercontext.builtin.persistence.topic_memory import TopicMemoryRepository
 from powercontext.builtin.persistence.topic_memory_index import (
     CompositeTopicMemoryIndex,
@@ -332,6 +333,11 @@ async def open_builtin_runtime(
             ("experience.generate", experience_generator, generated_experience),
             ("skill.generate", skill_generator, generated_skill),
             ("handoff.generate", handoff_pipeline, generated_handoff),
+            *(
+                (f"topic_memory.{stage}", None, object())
+                for stage in ("probe", "global", "planner", "evolve", "temporary", "reduce", "reconcile")
+                if config.inference.generation_model is not None
+            ),
         )
         prompt_registry = _prompt_registry(config.runtime, components)
         if configured_reranker is not None and tracing is not None:
@@ -371,6 +377,7 @@ async def open_builtin_runtime(
                 memory_reranker=configured_reranker,
                 source_registry=configured_source_registry,
                 cursor_secret=cursor_secret,
+                tracing=tracing,
                 prompt_registry=prompt_registry,
                 prompt_demonstrators=prompt_demonstrators,
                 handoff_verification_keys=handoff_verification_keys,
@@ -724,6 +731,7 @@ async def open_builtin_contexts(
     memory_reranker: MemoryReranker | None = None,
     source_registry: SourceDefinitionRegistry | None = None,
     cursor_secret: bytes | None = None,
+    tracing: RuntimeTracing | None = None,
     prompt_registry: PromptRegistry | None = None,
     prompt_demonstrators: dict[str, DemonstrationGenerator] | None = None,
     handoff_verification_keys: tuple[bytes, ...] = (),
@@ -752,6 +760,7 @@ async def open_builtin_contexts(
                 await bootstrap_processing_schema(connection, canonical_processing_manifest(config))
                 await assert_processing_schema_ready(connection, canonical_processing_manifest(config))
                 await ensure_skill_distribution_schema(connection)
+                await ensure_topic_memory_tag_schema(connection)
                 await ensure_dream_schema(connection)
                 await ensure_scope_search_schema(connection)
                 # A Topic child reuses its parent's schema. It never reads or
@@ -782,8 +791,11 @@ async def open_builtin_contexts(
                 prompt_registry=prompt_registry,
                 prompt_demonstrators=prompt_demonstrators,
                 handoff_verification_keys=handoff_verification_keys,
+                topic_memory_write_timeout_seconds=config.inference.embedding_timeout_seconds,
+                topic_memory_write_concurrency=config.runtime.generation_concurrency,
                 source_registry=source_registry,
                 cursor_secret=cursor_secret,
+                tracing=tracing,
             )
             await contexts.scopes.bootstrap_default()
             yield contexts
@@ -809,6 +821,7 @@ async def open_builtin_contexts(
             await bootstrap_processing_schema(connection, canonical_processing_manifest(config))
             await assert_processing_schema_ready(connection, canonical_processing_manifest(config))
             await ensure_skill_distribution_schema(connection)
+            await ensure_topic_memory_tag_schema(connection)
             await ensure_dream_schema(connection)
             await ensure_scope_search_schema(connection)
             if not _topic_memory_worker:
@@ -835,8 +848,11 @@ async def open_builtin_contexts(
             prompt_registry=prompt_registry,
             prompt_demonstrators=prompt_demonstrators,
             handoff_verification_keys=handoff_verification_keys,
+            topic_memory_write_timeout_seconds=config.inference.embedding_timeout_seconds,
+            topic_memory_write_concurrency=config.runtime.generation_concurrency,
             source_registry=source_registry,
             cursor_secret=cursor_secret,
+            tracing=tracing,
         )
         await contexts.scopes.bootstrap_default()
         yield contexts
@@ -1014,6 +1030,10 @@ async def _generation_pipelines(
                 "experience.generate",
                 "skill.generate",
                 "handoff.generate",
+                *(
+                    f"topic_memory.{stage}"
+                    for stage in ("probe", "global", "planner", "evolve", "temporary", "reduce", "reconcile")
+                ),
             ),
             generation_model,
             generation_limits,
