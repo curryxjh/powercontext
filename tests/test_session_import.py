@@ -337,7 +337,11 @@ def test_codex_reader_recovers_turn_ids_from_turn_context_and_task_started(tmp_p
                 "type": "response_item",
                 "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "same"}]},
             },
-            {"ordinal": 3, "type": "task_started", "payload": {"request_id": "turn-b"}},
+            {
+                "ordinal": 3,
+                "type": "event_msg",
+                "payload": {"type": "task_started", "request_id": "turn-b"},
+            },
             {
                 "ordinal": 4,
                 "type": "response_item",

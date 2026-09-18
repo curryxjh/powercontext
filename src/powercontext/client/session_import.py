@@ -411,7 +411,9 @@ def _read_codex_session_file(session_file: Path, *, session_root: Path) -> tuple
                     )
                     cwd = _string(typed_payload.get("cwd")) or cwd
                     continue
-                if record_type in {"turn_context", "task_started"}:
+                if record_type == "turn_context" or (
+                    record_type == "event_msg" and typed_payload.get("type") == "task_started"
+                ):
                     turn_id = _record_turn_id(record, typed_payload) or turn_id
                     cwd = _string(typed_payload.get("cwd")) or cwd
                     continue
