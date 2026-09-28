@@ -28,6 +28,28 @@ class Arm(StrEnum):
     ON = "on"
 
 
+def arm_scope_key(run_id: str, arm: Arm) -> str:
+    """Return the key that identifies the Scope registered for one run arm."""
+
+    return f"eval:{run_id}:{arm.value}"
+
+
+class TreatmentMode(StrEnum):
+    """The exact treatment arms executed for one evaluation task."""
+
+    OFF_ON = "off_on"
+    ON_ONLY = "on_only"
+    OFF_ONLY = "off_only"
+
+    @property
+    def arms(self) -> tuple[Arm, ...]:
+        if self is TreatmentMode.OFF_ON:
+            return (Arm.OFF, Arm.ON)
+        if self is TreatmentMode.ON_ONLY:
+            return (Arm.ON,)
+        return (Arm.OFF,)
+
+
 class PowerContextRef(BaseModel):
     """An explicit, immutable PowerContext source reference."""
 

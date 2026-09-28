@@ -24,6 +24,11 @@ from urllib.request import Request
 
 from typer.testing import CliRunner
 
+from powercontext_eval.benchmarks.longmemeval_v2.catalog import (
+    LongMemEvalV2EnvironmentError,
+    LongMemEvalV2InputError,
+)
+from powercontext_eval.benchmarks.longmemeval_v2.smoke import PreparedSmokeRun
 from powercontext_eval.cli import app
 from powercontext_eval.runner import MinimalRunResult, RunConfig
 
@@ -34,6 +39,84 @@ def test_cli_help_describes_the_evaluation_runner() -> None:
     assert result.exit_code == 0
     assert "PowerContext evaluation runner" in result.output
     assert not isinstance(result.exception, RuntimeError)
+
+
+def test_longmemeval_v2_smoke_prepares_input_artifacts_without_a_model(monkeypatch, tmp_path: Path) -> None:
+    def prepare(**kwargs: object) -> PreparedSmokeRun:
+        assert kwargs == {
+            "data_root": Path("/data"),
+            "dataset_lock": Path("/dataset-lock.json"),
+            "harness_root": Path("/harness"),
+            "smoke_manifest": Path("/smoke.json"),
+            "output_dir": Path("/output"),
+        }
+        return PreparedSmokeRun(
+            output_dir=tmp_path / "output",
+            manifest_path=tmp_path / "output" / "manifest.json",
+            subset_path=tmp_path / "output" / "subset.json",
+        )
+
+    monkeypatch.setattr("powercontext_eval.cli.prepare_smoke_run", prepare)
+    result = CliRunner().invoke(
+        app,
+        [
+            "longmemeval-v2",
+            "smoke",
+            "--data-root",
+            "/data",
+            "--dataset-lock",
+            "/dataset-lock.json",
+            "--harness-root",
+            "/harness",
+            "--smoke-manifest",
+            "/smoke.json",
+            "--output-dir",
+            "/output",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert '"classification": "smoke-subset"' in result.output
+
+
+def test_longmemeval_v2_smoke_reports_invalid_configuration_as_bad_parameter(monkeypatch) -> None:
+    def prepare(**_kwargs: object) -> PreparedSmokeRun:
+        raise LongMemEvalV2InputError("Smoke manifest schema is unsupported")
+
+    monkeypatch.setattr("powercontext_eval.cli.prepare_smoke_run", prepare)
+    result = CliRunner().invoke(app, ["longmemeval-v2", "smoke", *_longmemeval_smoke_arguments()])
+
+    assert result.exit_code == 2
+    assert "Invalid value" in result.output
+    assert "Smoke manifest schema is unsupported" in result.output
+
+
+def test_longmemeval_v2_smoke_reports_environment_failure_with_exit_one(monkeypatch) -> None:
+    def prepare(**_kwargs: object) -> PreparedSmokeRun:
+        raise LongMemEvalV2EnvironmentError("LongMemEval-V2 SHA-256 mismatch for questions.jsonl")
+
+    monkeypatch.setattr("powercontext_eval.cli.prepare_smoke_run", prepare)
+    result = CliRunner().invoke(app, ["longmemeval-v2", "smoke", *_longmemeval_smoke_arguments()])
+
+    assert result.exit_code == 1
+    assert "LongMemEval-V2 smoke failed" in result.output
+    assert "SHA-256 mismatch" in result.output
+    assert "Invalid value" not in result.output
+
+
+def _longmemeval_smoke_arguments() -> list[str]:
+    return [
+        "--data-root",
+        "/data",
+        "--dataset-lock",
+        "/dataset-lock.json",
+        "--harness-root",
+        "/harness",
+        "--smoke-manifest",
+        "/smoke.json",
+        "--output-dir",
+        "/output",
+    ]
 
 
 def test_codex_contract_smoke_is_an_executable_injectable_cli(monkeypatch) -> None:
@@ -204,7 +287,7 @@ def test_swebench_pro_run_defaults_optional_integrations_off(monkeypatch) -> Non
     assert captured[0].proxy_url is None
 
 
-def test_cli_creates_a_luna_batch_atomically_paused(monkeypatch) -> None:
+def test_cli_creates_a_single_arm_luna_batch_atomically_paused(monkeypatch) -> None:
     calls: list[tuple[Request, float]] = []
 
     class Response:
@@ -238,6 +321,8 @@ def test_cli_creates_a_luna_batch_atomically_paused(monkeypatch) -> None:
             "gpt-5.6-luna",
             "--task-set",
             "swebench-pro-stability-v1",
+            "--treatment-mode",
+            "on_only",
             "--start-paused",
         ],
     )
@@ -252,6 +337,7 @@ def test_cli_creates_a_luna_batch_atomically_paused(monkeypatch) -> None:
     payload = json.loads(request.data)
     assert payload["model"] == "gpt-5.6-luna"
     assert payload["task_set"] == "swebench-pro-stability-v1"
+    assert payload["treatment_mode"] == "on_only"
     assert payload["initial_control_intent"] == "pause"
 
 
