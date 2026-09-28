@@ -18,14 +18,12 @@ import json
 from pathlib import Path
 from typing import Any
 
-import pytest
 from typer.testing import CliRunner
 
 import powercontext.client.cli as client_cli
 from powercontext.cli.app import create_cli
 from powercontext.client.errors import ServerResponseError
 from powercontext.client.session_import import (
-    SessionImportError,
     SessionImportResult,
     import_sessions,
     read_codex_prompts,
@@ -33,11 +31,11 @@ from powercontext.client.session_import import (
 from powercontext.http import (
     CaptureContentSourceResponse,
     CaptureStatus,
-    FlushMemoryResponse,
-    FlushStatus,
     ScopeDescriptor,
     SourceReference,
 )
+
+_DESTINATION_ID = "https://server-a.example"
 
 
 def test_codex_reader_imports_only_real_user_prompts_with_workspace(tmp_path: Path) -> None:
@@ -132,7 +130,7 @@ def test_codex_reader_skips_sessions_without_workspace(tmp_path: Path) -> None:
     assert read_result.prompts == ()
 
 
-def test_import_sessions_resolves_scope_captures_sources_and_flushes(tmp_path: Path, monkeypatch) -> None:
+def test_import_sessions_resolves_scope_and_captures_sources(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("POWERCONTEXT_TEST_TOKEN", "TOKEN_VALUE")
     codex_home = tmp_path / "codex"
     session_dir = codex_home / "sessions"
@@ -163,7 +161,15 @@ def test_import_sessions_resolves_scope_captures_sources_and_flushes(tmp_path: P
     checkpoint = tmp_path / "checkpoint.json"
     client = _ImportClient()
 
-    result = _run(import_sessions(client, host="codex", codex_home=codex_home, checkpoint_file=checkpoint, flush=True))
+    result = _run(
+        import_sessions(
+            client,
+            host="codex",
+            destination_id=_DESTINATION_ID,
+            codex_home=codex_home,
+            checkpoint_file=checkpoint,
+        )
+    )
 
     assert result == SessionImportResult(
         host="codex",
@@ -177,7 +183,6 @@ def test_import_sessions_resolves_scope_captures_sources_and_flushes(tmp_path: P
         failed_by_reason={},
         checkpoint_file=str(checkpoint),
         items=result.items,
-        flushed_scopes=("scope-a",),
     )
     assert len(client.resolve_scope_requests) == 1
     assert client.resolve_scope_requests[0].allow_default is False
@@ -187,7 +192,8 @@ def test_import_sessions_resolves_scope_captures_sources_and_flushes(tmp_path: P
     assert client.capture_requests[0].content == "[REDACTED]"
     assert client.capture_requests[0].metadata["origin"] == "codex"
     assert client.capture_requests[0].metadata["event"] == "user_prompt_submit"
-    assert client.flush_requests == ["scope-a"]
+    saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert saved["destination_id"] == _DESTINATION_ID
 
 
 def test_import_sessions_redacts_auth_from_selected_codex_home(tmp_path: Path, monkeypatch) -> None:
@@ -217,7 +223,7 @@ def test_import_sessions_redacts_auth_from_selected_codex_home(tmp_path: Path, m
     )
     client = _ImportClient()
 
-    _run(import_sessions(client, host="codex", codex_home=codex_home))
+    _run(import_sessions(client, host="codex", destination_id=_DESTINATION_ID, codex_home=codex_home))
 
     assert secret not in client.capture_requests[0].content
     assert client.capture_requests[0].content == "token is [REDACTED]"
@@ -242,14 +248,22 @@ def test_import_sessions_dry_run_does_not_write_sources(tmp_path: Path) -> None:
     )
     client = _ImportClient()
 
-    result = _run(import_sessions(client, host="codex", codex_home=codex_home, scope_id="explicit", dry_run=True))
+    result = _run(
+        import_sessions(
+            client,
+            host="codex",
+            destination_id=_DESTINATION_ID,
+            codex_home=codex_home,
+            scope_id="explicit",
+            dry_run=True,
+        )
+    )
 
     assert result.imported == 1
     assert result.skipped_by_reason == {}
     assert result.checkpoint_file is None
     assert client.resolve_scope_requests == []
     assert client.capture_requests == []
-    assert client.flush_requests == []
 
 
 def test_import_sessions_skips_unresolved_scope_without_default_fallback(tmp_path: Path) -> None:
@@ -271,7 +285,7 @@ def test_import_sessions_skips_unresolved_scope_without_default_fallback(tmp_pat
     )
     client = _ImportClient(resolve_error=ServerResponseError(status_code=404, request_id=None))
 
-    result = _run(import_sessions(client, host="codex", codex_home=codex_home))
+    result = _run(import_sessions(client, host="codex", destination_id=_DESTINATION_ID, codex_home=codex_home))
 
     assert result.imported == 0
     assert result.skipped == 1
@@ -308,7 +322,7 @@ def test_import_sessions_uses_live_hook_source_identity(tmp_path: Path) -> None:
     )
     client = _ImportClient()
 
-    _run(import_sessions(client, host="codex", codex_home=codex_home))
+    _run(import_sessions(client, host="codex", destination_id=_DESTINATION_ID, codex_home=codex_home))
 
     assert len(client.capture_requests) == 1
     assert client.capture_requests[0].source_id == _live_hook_source_id("scope-a", "session-a", "turn-a", "overlap")
@@ -358,7 +372,7 @@ def test_codex_reader_recovers_turn_ids_from_turn_context_and_task_started(tmp_p
     )
 
 
-def test_codex_reader_skips_injected_agents_context_messages(tmp_path: Path) -> None:
+def test_codex_reader_skips_host_generated_user_messages(tmp_path: Path) -> None:
     codex_home = tmp_path / "codex"
     session_dir = codex_home / "sessions"
     session_dir.mkdir(parents=True)
@@ -384,6 +398,29 @@ def test_codex_reader_skips_injected_agents_context_messages(tmp_path: Path) -> 
             },
             {
                 "ordinal": 2,
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "<turn_aborted>interrupted</turn_aborted>"}],
+                },
+            },
+            {
+                "ordinal": 3,
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": '<codex_internal_context source="goal">continue</codex_internal_context>',
+                        }
+                    ],
+                },
+            },
+            {
+                "ordinal": 4,
                 "type": "response_item",
                 "payload": {
                     "type": "message",
@@ -442,7 +479,7 @@ def test_import_sessions_overlaps_with_live_capture_without_conflict(tmp_path: P
         }
     )
 
-    result = _run(import_sessions(client, host="codex", codex_home=codex_home))
+    result = _run(import_sessions(client, host="codex", destination_id=_DESTINATION_ID, codex_home=codex_home))
 
     assert result.imported == 1
     assert result.failed == 0
@@ -495,7 +532,15 @@ def test_import_sessions_skips_redaction_conflict_with_existing_live_capture(tmp
         }
     )
 
-    result = _run(import_sessions(client, host="codex", codex_home=codex_home, checkpoint_file=checkpoint))
+    result = _run(
+        import_sessions(
+            client,
+            host="codex",
+            destination_id=_DESTINATION_ID,
+            codex_home=codex_home,
+            checkpoint_file=checkpoint,
+        )
+    )
 
     assert result.imported == 0
     assert result.failed == 0
@@ -527,8 +572,24 @@ def test_import_sessions_checkpoint_skips_already_accepted_items(tmp_path: Path)
     checkpoint = tmp_path / "checkpoint.json"
     client = _ImportClient()
 
-    first = _run(import_sessions(client, host="codex", codex_home=codex_home, checkpoint_file=checkpoint))
-    second = _run(import_sessions(client, host="codex", codex_home=codex_home, checkpoint_file=checkpoint))
+    first = _run(
+        import_sessions(
+            client,
+            host="codex",
+            destination_id=_DESTINATION_ID,
+            codex_home=codex_home,
+            checkpoint_file=checkpoint,
+        )
+    )
+    second = _run(
+        import_sessions(
+            client,
+            host="codex",
+            destination_id=_DESTINATION_ID,
+            codex_home=codex_home,
+            checkpoint_file=checkpoint,
+        )
+    )
 
     assert first.imported == 1
     assert second.imported == 0
@@ -538,7 +599,7 @@ def test_import_sessions_checkpoint_skips_already_accepted_items(tmp_path: Path)
     assert next(iter(saved["items"].values()))["status"] == "accepted"
 
 
-def test_import_sessions_flushes_checkpoint_accepted_positions(tmp_path: Path) -> None:
+def test_import_sessions_does_not_trust_checkpoint_from_another_destination(tmp_path: Path) -> None:
     codex_home = tmp_path / "codex"
     session_dir = codex_home / "sessions"
     session_dir.mkdir(parents=True)
@@ -559,54 +620,33 @@ def test_import_sessions_flushes_checkpoint_accepted_positions(tmp_path: Path) -
     first_client = _ImportClient()
     second_client = _ImportClient()
 
-    _run(import_sessions(first_client, host="codex", codex_home=codex_home, checkpoint_file=checkpoint))
+    _run(
+        import_sessions(
+            first_client,
+            host="codex",
+            destination_id="https://server-a.example",
+            codex_home=codex_home,
+            checkpoint_file=checkpoint,
+        )
+    )
     second = _run(
-        import_sessions(second_client, host="codex", codex_home=codex_home, checkpoint_file=checkpoint, flush=True)
+        import_sessions(
+            second_client,
+            host="codex",
+            destination_id="https://server-b.example",
+            codex_home=codex_home,
+            checkpoint_file=checkpoint,
+        )
     )
 
-    assert second.skipped_by_reason == {"checkpoint_accepted": 1}
-    assert second_client.capture_requests == []
-    assert second_client.flush_requests == ["scope-a"]
-    assert second.flushed_scopes == ("scope-a",)
+    assert second.imported == 1
+    assert second.skipped_by_reason == {}
+    assert len(second_client.capture_requests) == 1
+    saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert saved["destination_id"] == "https://server-b.example"
 
 
-def test_import_sessions_flushes_until_highest_imported_position(tmp_path: Path) -> None:
-    codex_home = tmp_path / "codex"
-    session_dir = codex_home / "sessions"
-    session_dir.mkdir(parents=True)
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    _write_jsonl(
-        session_dir / "rollout.jsonl",
-        [
-            {"ordinal": 0, "type": "session_meta", "payload": {"cwd": str(workspace)}},
-            {
-                "ordinal": 1,
-                "type": "response_item",
-                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "first"}]},
-            },
-            {
-                "ordinal": 2,
-                "type": "response_item",
-                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "second"}]},
-            },
-            {
-                "ordinal": 3,
-                "type": "response_item",
-                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "third"}]},
-            },
-        ],
-    )
-    client = _ImportClient(flush_window_limit=2)
-
-    result = _run(import_sessions(client, host="codex", codex_home=codex_home, flush=True))
-
-    assert result.imported == 3
-    assert result.flushed_scopes == ("scope-a",)
-    assert client.flush_requests == ["scope-a", "scope-a"]
-
-
-def test_import_sessions_reports_stalled_flush(tmp_path: Path) -> None:
+def test_import_sessions_does_not_trust_legacy_checkpoint_without_destination(tmp_path: Path) -> None:
     codex_home = tmp_path / "codex"
     session_dir = codex_home / "sessions"
     session_dir.mkdir(parents=True)
@@ -623,10 +663,31 @@ def test_import_sessions_reports_stalled_flush(tmp_path: Path) -> None:
             },
         ],
     )
-    client = _ImportClient(flush_window_limit=0)
+    checkpoint = tmp_path / "checkpoint.json"
+    checkpoint.write_text(
+        json.dumps({
+            "schema": "powercontext.session-import.codex.v1",
+            "items": {"legacy-source": {"status": "accepted"}},
+        }),
+        encoding="utf-8",
+    )
+    client = _ImportClient()
 
-    with pytest.raises(SessionImportError, match="stopped at cursor 0 before imported Source position 1"):
-        _run(import_sessions(client, host="codex", codex_home=codex_home, flush=True))
+    result = _run(
+        import_sessions(
+            client,
+            host="codex",
+            destination_id=_DESTINATION_ID,
+            codex_home=codex_home,
+            checkpoint_file=checkpoint,
+        )
+    )
+
+    assert result.imported == 1
+    assert len(client.capture_requests) == 1
+    saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert saved["schema"] == "powercontext.session-import.codex.v2"
+    assert saved["destination_id"] == _DESTINATION_ID
 
 
 def test_import_sessions_records_failed_items_in_checkpoint(tmp_path: Path) -> None:
@@ -649,7 +710,15 @@ def test_import_sessions_records_failed_items_in_checkpoint(tmp_path: Path) -> N
     checkpoint = tmp_path / "checkpoint.json"
     client = _ImportClient(capture_error=ServerResponseError(status_code=503, request_id=None))
 
-    result = _run(import_sessions(client, host="codex", codex_home=codex_home, checkpoint_file=checkpoint))
+    result = _run(
+        import_sessions(
+            client,
+            host="codex",
+            destination_id=_DESTINATION_ID,
+            codex_home=codex_home,
+            checkpoint_file=checkpoint,
+        )
+    )
 
     assert result.imported == 0
     assert result.failed == 1
@@ -683,9 +752,33 @@ def test_import_sessions_retries_failed_checkpoint_items_without_duplicate_write
     failing_client = _ImportClient(capture_error=ServerResponseError(status_code=503, request_id=None))
     successful_client = _ImportClient()
 
-    failed = _run(import_sessions(failing_client, host="codex", codex_home=codex_home, checkpoint_file=checkpoint))
-    resumed = _run(import_sessions(successful_client, host="codex", codex_home=codex_home, checkpoint_file=checkpoint))
-    repeated = _run(import_sessions(successful_client, host="codex", codex_home=codex_home, checkpoint_file=checkpoint))
+    failed = _run(
+        import_sessions(
+            failing_client,
+            host="codex",
+            destination_id=_DESTINATION_ID,
+            codex_home=codex_home,
+            checkpoint_file=checkpoint,
+        )
+    )
+    resumed = _run(
+        import_sessions(
+            successful_client,
+            host="codex",
+            destination_id=_DESTINATION_ID,
+            codex_home=codex_home,
+            checkpoint_file=checkpoint,
+        )
+    )
+    repeated = _run(
+        import_sessions(
+            successful_client,
+            host="codex",
+            destination_id=_DESTINATION_ID,
+            codex_home=codex_home,
+            checkpoint_file=checkpoint,
+        )
+    )
 
     assert failed.failed_by_reason == {"capture_failed": 1}
     assert resumed.imported == 1
@@ -754,6 +847,13 @@ def test_import_sessions_cli_requires_host() -> None:
     assert "Missing option" in result.output
 
 
+def test_import_sessions_cli_does_not_offer_shared_journal_flush() -> None:
+    result = CliRunner().invoke(create_cli([]), ["import-sessions", "--help"])
+
+    assert result.exit_code == 0
+    assert "--flush" not in result.output
+
+
 def test_import_sessions_cli_writes_json_summary(monkeypatch, tmp_path: Path) -> None:
     async def fake_import(_client: object, **kwargs: object) -> SessionImportResult:
         assert kwargs["host"] == "codex"
@@ -761,6 +861,7 @@ def test_import_sessions_cli_writes_json_summary(monkeypatch, tmp_path: Path) ->
         assert kwargs["codex_home"] == tmp_path
         assert kwargs["checkpoint_file"] is None
         assert kwargs["dry_run"] is True
+        assert kwargs["destination_id"] == "http://127.0.0.1:8000"
         return SessionImportResult(
             host="codex",
             scanned_files=2,
@@ -806,7 +907,6 @@ def test_import_sessions_cli_writes_json_summary(monkeypatch, tmp_path: Path) ->
         "failed_by_reason": {},
         "checkpoint_file": None,
         "items": [],
-        "flushed_scopes": [],
     }
 
 
@@ -817,16 +917,12 @@ class _ImportClient:
         resolve_error: ServerResponseError | None = None,
         capture_error: ServerResponseError | None = None,
         stored_sources: dict[str, dict[str, object]] | None = None,
-        flush_window_limit: int = 1,
     ) -> None:
         self.resolve_error = resolve_error
         self.capture_error = capture_error
         self.stored_sources = stored_sources or {}
-        self.flush_window_limit = flush_window_limit
-        self.flush_cursors: dict[str, int] = {}
         self.resolve_scope_requests: list[Any] = []
         self.capture_requests: list[Any] = []
-        self.flush_requests: list[str] = []
 
     async def resolve_scope_binding(self, request: Any) -> ScopeDescriptor:
         self.resolve_scope_requests.append(request)
@@ -866,19 +962,6 @@ class _ImportClient:
             status=CaptureStatus.ACCEPTED,
             source=SourceReference(name="content", source_id=request.source_id),
             position=position,
-        )
-
-    async def flush_memory(self, request: Any) -> FlushMemoryResponse:
-        self.flush_requests.append(request.scope_id)
-        previous_cursor = self.flush_cursors.get(request.scope_id, 0)
-        current_cursor = previous_cursor + self.flush_window_limit
-        self.flush_cursors[request.scope_id] = current_cursor
-        return FlushMemoryResponse(
-            status=FlushStatus.PROCESSED,
-            previous_cursor=previous_cursor,
-            current_cursor=current_cursor,
-            high_watermark=current_cursor,
-            processed_source_count=self.flush_window_limit,
         )
 
 

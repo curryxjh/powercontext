@@ -32,8 +32,6 @@ from powercontext.client.errors import ClientError, ServerResponseError
 from powercontext.http import (
     CaptureContentSourceRequest,
     CaptureContentSourceResponse,
-    FlushMemoryRequest,
-    FlushMemoryResponse,
     ResolveScopeBindingRequest,
     ScopeBindingKey,
     ScopeDescriptor,
@@ -42,7 +40,7 @@ from powercontext.http import (
 SUPPORTED_SESSION_IMPORT_HOSTS = ("codex",)
 _MAX_CONTENT_LENGTH = 200_000
 _UNRESOLVED_SCOPE_STATUSES = frozenset({404, 422})
-_CHECKPOINT_SCHEMA = "powercontext.session-import.codex.v1"
+_CHECKPOINT_SCHEMA = "powercontext.session-import.codex.v2"
 
 
 class SessionImportError(RuntimeError):
@@ -65,11 +63,8 @@ class SessionImportError(RuntimeError):
         return cls(f"invalid Codex session record in {session_file} line {line_number}")
 
     @classmethod
-    def stalled_flush(cls, scope_id: str, target_position: int, current_cursor: int) -> SessionImportError:
-        return cls(
-            f"memory flush for Scope {scope_id} stopped at cursor {current_cursor} before imported Source "
-            f"position {target_position}"
-        )
+    def invalid_destination(cls) -> SessionImportError:
+        return cls("destination_id must not be empty")
 
 
 class SessionImportClient(Protocol):
@@ -78,8 +73,6 @@ class SessionImportClient(Protocol):
     async def resolve_scope_binding(self, request: ResolveScopeBindingRequest) -> ScopeDescriptor: ...
 
     async def capture_content_source(self, request: CaptureContentSourceRequest) -> CaptureContentSourceResponse: ...
-
-    async def flush_memory(self, request: FlushMemoryRequest) -> FlushMemoryResponse: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,7 +155,6 @@ class SessionImportResult:
     failed_by_reason: Mapping[str, int]
     checkpoint_file: str | None
     items: tuple[SessionImportItemResult, ...]
-    flushed_scopes: tuple[str, ...] = ()
 
     def as_json(self) -> dict[str, object]:
         return {
@@ -177,7 +169,6 @@ class SessionImportResult:
             "failed_by_reason": dict(self.failed_by_reason),
             "checkpoint_file": self.checkpoint_file,
             "items": [item.as_json() for item in self.items],
-            "flushed_scopes": list(self.flushed_scopes),
         }
 
 
@@ -185,33 +176,34 @@ class SessionImportResult:
 class _PromptProcessingResult:
     item: SessionImportItemResult
     imported: bool = False
-    pending_flush: tuple[str, int] | None = None
 
 
 async def import_sessions(
     client: SessionImportClient,
     *,
     host: str,
+    destination_id: str,
     scope_id: str | None = None,
     codex_home: Path | None = None,
     checkpoint_file: Path | None = None,
     dry_run: bool = False,
-    flush: bool = False,
 ) -> SessionImportResult:
     """Import historical user prompts from one supported host."""
 
     if host != "codex":
         raise SessionImportError.unsupported_host(host)
+    destination_id = destination_id.strip()
+    if not destination_id:
+        raise SessionImportError.invalid_destination()
 
     codex_home = _codex_home(codex_home)
     checkpoint_file = _checkpoint_file(codex_home, checkpoint_file)
-    checkpoint = _load_checkpoint(checkpoint_file)
+    checkpoint = _load_checkpoint(checkpoint_file, destination_id=destination_id)
     read_result = read_codex_prompts(codex_home=codex_home)
     imported = 0
     skipped_by_reason: dict[str, int] = {}
     failed_by_reason: dict[str, int] = {}
     items: list[SessionImportItemResult] = []
-    pending_flush_positions: dict[str, int] = {}
     for prompt in read_result.prompts:
         processed = await _process_prompt(
             client,
@@ -230,15 +222,6 @@ async def import_sessions(
             _count_skip(failed_by_reason, item.reason)
         if processed.imported:
             imported += 1
-        if processed.pending_flush is not None:
-            pending_scope_id, pending_position = processed.pending_flush
-            pending_flush_positions[pending_scope_id] = max(
-                pending_position,
-                pending_flush_positions.get(pending_scope_id, 0),
-            )
-    flushed_scopes: tuple[str, ...] = ()
-    if flush and not dry_run:
-        flushed_scopes = await _flush_scopes_through(client, pending_flush_positions)
     return SessionImportResult(
         host=host,
         scanned_files=read_result.scanned_files,
@@ -251,7 +234,6 @@ async def import_sessions(
         failed_by_reason=failed_by_reason,
         checkpoint_file=None if dry_run else str(checkpoint_file),
         items=tuple(items),
-        flushed_scopes=flushed_scopes,
     )
 
 
@@ -276,7 +258,6 @@ async def _process_prompt(
     if resolved_scope_id is None:
         return _PromptProcessingResult(_item_result(prompt, SessionImportItemStatus.SKIPPED, reason="unresolved_scope"))
     source_id = prompt.source_id_for_scope(resolved_scope_id)
-    checkpoint_position = _checkpoint_position(checkpoint, source_id)
     if _checkpoint_status(checkpoint, source_id) == SessionImportItemStatus.ACCEPTED.value:
         return _PromptProcessingResult(
             _item_result(
@@ -284,10 +265,9 @@ async def _process_prompt(
                 SessionImportItemStatus.SKIPPED,
                 source_id=source_id,
                 scope_id=resolved_scope_id,
-                position=checkpoint_position,
+                position=_checkpoint_position(checkpoint, source_id),
                 reason="checkpoint_accepted",
-            ),
-            pending_flush=None if checkpoint_position is None else (resolved_scope_id, checkpoint_position),
+            )
         )
     if dry_run:
         return _PromptProcessingResult(
@@ -334,7 +314,7 @@ async def _process_prompt(
     )
     _record_checkpoint(checkpoint, accepted)
     _save_checkpoint(checkpoint_file, checkpoint)
-    return _PromptProcessingResult(accepted, imported=True, pending_flush=(resolved_scope_id, captured.position))
+    return _PromptProcessingResult(accepted, imported=True)
 
 
 def _is_redacted_source_conflict(error: ClientError, prompt: ImportedPrompt, content: str) -> bool:
@@ -344,22 +324,6 @@ def _is_redacted_source_conflict(error: ClientError, prompt: ImportedPrompt, con
         and error.code == "source_conflict"
         and content != prompt.content
     )
-
-
-async def _flush_scopes_through(
-    client: SessionImportClient,
-    pending_flush_positions: Mapping[str, int],
-) -> tuple[str, ...]:
-    flushed_scopes: list[str] = []
-    for scope_id, target_position in sorted(pending_flush_positions.items()):
-        current_cursor = 0
-        while current_cursor < target_position:
-            flushed = await client.flush_memory(FlushMemoryRequest(scope_id=scope_id))
-            if flushed.current_cursor <= current_cursor:
-                raise SessionImportError.stalled_flush(scope_id, target_position, flushed.current_cursor)
-            current_cursor = flushed.current_cursor
-        flushed_scopes.append(scope_id)
-    return tuple(flushed_scopes)
 
 
 def read_codex_prompts(*, codex_home: Path | None = None) -> CodexPromptReadResult:
@@ -529,15 +493,23 @@ def _checkpoint_file(codex_home: Path, checkpoint_file: Path | None) -> Path:
     return codex_home / ".powercontext" / "session-import" / "codex.json"
 
 
-def _load_checkpoint(path: Path) -> dict[str, object]:
+def _new_checkpoint(destination_id: str) -> dict[str, object]:
+    return {"schema": _CHECKPOINT_SCHEMA, "destination_id": destination_id, "items": {}}
+
+
+def _load_checkpoint(path: Path, *, destination_id: str) -> dict[str, object]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return {"schema": _CHECKPOINT_SCHEMA, "items": {}}
+        return _new_checkpoint(destination_id)
     except (OSError, json.JSONDecodeError):
-        return {"schema": _CHECKPOINT_SCHEMA, "items": {}}
-    if not isinstance(value, dict) or value.get("schema") != _CHECKPOINT_SCHEMA:
-        return {"schema": _CHECKPOINT_SCHEMA, "items": {}}
+        return _new_checkpoint(destination_id)
+    if (
+        not isinstance(value, dict)
+        or value.get("schema") != _CHECKPOINT_SCHEMA
+        or value.get("destination_id") != destination_id
+    ):
+        return _new_checkpoint(destination_id)
     items = value.get("items")
     if not isinstance(items, dict):
         value["items"] = {}
@@ -672,7 +644,7 @@ def _is_synthetic_codex_user_message(content: str) -> bool:
     stripped = content.strip()
     return (
         stripped.startswith("<environment_context>") and stripped.endswith("</environment_context>")
-    ) or stripped.startswith("# AGENTS.md instructions")
+    ) or stripped.startswith(("# AGENTS.md instructions", "<turn_aborted", "<codex_internal_context"))
 
 
 def _environment_cwd_from_record(record: Mapping[str, object], payload: Mapping[str, object]) -> str | None:

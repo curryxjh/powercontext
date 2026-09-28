@@ -25,9 +25,10 @@ content under the same identity as if it were a new observation.
 
 - Agent prompt hooks: use the host-specific capture switch in [Connect Agents](../integrations/index.md).
 - Pre-install Codex prompts: with the Server running, use `powercontext import-sessions --host codex` to import
-  historical user prompts from `CODEX_HOME` or `~/.codex`. The command writes ordinary Content Sources only, uses a
-  persistent checkpoint under the Codex home directory, skips sessions whose workspace cannot resolve to a Scope, and
-  runs extraction only when `--flush` is supplied. Preview the scan with `--dry-run`.
+  historical user prompts from `CODEX_HOME` or `~/.codex` on the CLI machine. The command can write to a remote Server,
+  writes ordinary Content Sources only, binds its persistent checkpoint to that Server, and skips sessions whose
+  workspace cannot resolve to a Scope. Extraction remains a separate operation: configured background processing can
+  still process imported Sources. Preview the scan with `--dry-run`.
 - Files and object stores: use the [OpenDAL connector](ingest-text-files-with-opendal.md).
 - Subject evidence for a Scope profile: follow [Scope profiles](use-profiles.md).
 - Application or evaluation events: use the application's adapter; [Bub capture](../integrations/evaluation.md) is opt-in.

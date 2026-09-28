@@ -1296,7 +1296,7 @@ def _print_receiver_watch_error(error: Exception, retry_delay: float) -> None:
     typer.echo(f"Remote Skill sync failed; retrying in {retry_delay:g} seconds: {error}", err=True)
 
 
-def _print_session_import_result(result: SessionImportResult, *, dry_run: bool, flush_requested: bool) -> None:
+def _print_session_import_result(result: SessionImportResult, *, dry_run: bool) -> None:
     action = "Would import" if dry_run else "Imported"
     typer.echo(
         f"{action} {result.imported} Codex user prompt(s) from {result.scanned_files} session file(s); "
@@ -1312,10 +1312,8 @@ def _print_session_import_result(result: SessionImportResult, *, dry_run: bool, 
         typer.echo(f"Checkpoint: {result.checkpoint_file}")
     if dry_run:
         typer.echo("Dry run only; no Sources were written.")
-    elif flush_requested:
-        typer.echo(f"Flushed {len(result.flushed_scopes)} Scope(s).")
     else:
-        typer.echo("Sources were written only; run with --flush to request Memory extraction.")
+        typer.echo("Sources were written only; configured background processing may extract them separately.")
 
 
 def _install_remote_skill_service(config_file: Path, interval: float) -> ReceiverServiceInstallation:
@@ -1416,10 +1414,6 @@ def import_sessions(
         bool,
         typer.Option("--dry-run/--no-dry-run", help="Inspect importable prompts without writing Sources."),
     ] = False,
-    flush: Annotated[
-        bool,
-        typer.Option("--flush/--no-flush", help="Run Memory flush after writing Sources for each touched Scope."),
-    ] = False,
 ) -> None:
     """Import pre-install user prompts from one agent host as ordinary Content Sources."""
 
@@ -1431,7 +1425,6 @@ def import_sessions(
             codex_home=codex_home,
             checkpoint_file=checkpoint_file,
             dry_run=dry_run,
-            flush=flush,
         )
     )
 
@@ -1444,7 +1437,6 @@ async def _import_sessions(
     codex_home: Path | None,
     checkpoint_file: Path | None,
     dry_run: bool,
-    flush: bool,
 ) -> None:
     options = _options(context)
     try:
@@ -1455,11 +1447,11 @@ async def _import_sessions(
             result = await run_session_import(
                 client,
                 host=host,
+                destination_id=options.server_url,
                 scope_id=scope_id,
                 codex_home=codex_home,
                 checkpoint_file=checkpoint_file,
                 dry_run=dry_run,
-                flush=flush,
             )
     except SessionImportError as exc:
         typer.echo(str(exc), err=True)
@@ -1471,7 +1463,7 @@ async def _import_sessions(
     if options.json_output:
         typer.echo(json.dumps(result.as_json(), ensure_ascii=False, indent=2))
         return
-    _print_session_import_result(result, dry_run=dry_run, flush_requested=flush)
+    _print_session_import_result(result, dry_run=dry_run)
 
 
 async def _execute(context: typer.Context, operation: _ClientOperation) -> None:
