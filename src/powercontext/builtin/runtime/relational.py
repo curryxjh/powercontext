@@ -36,7 +36,6 @@ from referencing.exceptions import Unresolvable
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from powercontext._logging import log_safely
 from powercontext.artifacts import Artifact, ArtifactRef, MemoryCitation
 from powercontext.builtin.artifacts.experience import (
     EXPERIENCE_INCUBATION_CURSOR_NAME,
@@ -46,6 +45,7 @@ from powercontext.builtin.artifacts.experience import (
     ExperienceContent,
     ExperienceGenerator,
     ExperienceSearchHit,
+    ExperienceSearchOutcome,
 )
 from powercontext.builtin.artifacts.handoff import (
     ActivateHandoff,
@@ -61,6 +61,9 @@ from powercontext.builtin.artifacts.memory import (
     CandidatePipeline,
     EmbeddingProfile,
     Memory,
+    MemoryCapacityBudget,
+    MemoryCompactionPolicy,
+    MemoryQueryEmbedding,
     MemoryReranker,
     MemoryService,
     MemoryWritePlan,
@@ -78,6 +81,7 @@ from powercontext.builtin.artifacts.prompt.service import (
     current_prompt,
     prompt_operation,
 )
+from powercontext.builtin.artifacts.search import AdmissionFloor
 from powercontext.builtin.artifacts.skill import (
     ExternalSkillProvider,
     ExternalSkillRegistryUnavailableError,
@@ -142,6 +146,7 @@ from powercontext.builtin.persistence.memory_index import MemoryIndex, NoMemoryI
 from powercontext.builtin.persistence.processing import ArtifactProcessingPendingRepository
 from powercontext.builtin.persistence.processing_intents import ArtifactProcessingIntentRepository
 from powercontext.builtin.persistence.records import RelationalRecordService
+from powercontext.builtin.persistence.recurrence import RecurrenceRepository
 from powercontext.builtin.persistence.skill_packages import SkillPackageRepository
 from powercontext.builtin.persistence.skill_publications import SkillPublicationRepository
 from powercontext.builtin.persistence.source_definitions import SourceDefinitionManifestRepository
@@ -164,6 +169,8 @@ from powercontext.builtin.review.generation import (
 )
 from powercontext.builtin.review.models import ArtifactCandidate
 from powercontext.builtin.review.service import ReviewService
+from powercontext.builtin.runtime._model_usage import _ModelUsageRecorder
+from powercontext.builtin.runtime.decision_model import DecisionModel
 from powercontext.builtin.runtime.models import (
     CommitConnectorCheckpoint,
     ConnectorCheckpointState,
@@ -180,6 +187,7 @@ from powercontext.builtin.runtime.protocols import (
     TraceAttribute,
 )
 from powercontext.builtin.runtime.recall import RelationalRecallTokenEstimator
+from powercontext.builtin.runtime.recurrence import RelationalRecurrenceLedger
 from powercontext.builtin.runtime.statistics import RelationalScopedStatistics
 from powercontext.builtin.scope import ScopeApplication
 from powercontext.builtin.scope.subject_sources import SubjectSourceService
@@ -268,6 +276,7 @@ class _Repositories:
     agent_skill_targets: RemoteAgentSkillTargetRepository
     skill_publications: SkillPublicationRepository
     statistics: StatisticsRepository
+    recurrence: RecurrenceRepository
     processing_pending: ArtifactProcessingPendingRepository
     processing_leases: ArtifactProcessingLeaseRepository
     processing_binding_states: ArtifactProcessingBindingStateRepository
@@ -291,6 +300,10 @@ class _ScopedServices:
     embedding_model: EmbeddingModel | None
     memory_reranker: MemoryReranker | None
     memory_rerank_candidate_limit: int
+    decision_model: DecisionModel | None
+    memory_capacity_budget: MemoryCapacityBudget
+    memory_compaction: MemoryCompactionPolicy
+    memory_max_history_revisions: int
     id_factory: IdFactory
     handoff_artifact_id: str
     memory_artifact_id: str
@@ -299,6 +312,7 @@ class _ScopedServices:
     source_registry: SourceDefinitionRegistry
     prompts: PromptService
     generation_receipts: HandoffGenerationReceipts
+    model_usage: _ModelUsageRecorder
 
     def generation_sources(self) -> GenerationSourceAccess:
         return GenerationSourceAccess(self.repositories.sources)
@@ -336,6 +350,9 @@ class _ScopedServices:
             embedding_model=self.embedding_model,
             reranker=self.memory_reranker,
             rerank_candidate_limit=self.memory_rerank_candidate_limit,
+            capacity_budget=self.memory_capacity_budget,
+            compaction=self.memory_compaction,
+            max_history_revisions=self.memory_max_history_revisions,
             source_resolver=_RelationalMemorySourceResolver(
                 database=self.database,
                 scope_id=self.scope_id,
@@ -383,6 +400,18 @@ class _ScopedServices:
             id_factory=self.id_factory,
             evidence=self.evidence(),
             connection=connection,
+        )
+
+    def recurrence_ledger(self) -> RelationalRecurrenceLedger:
+        """Return the only writer of the recurrence ledger."""
+
+        return RelationalRecurrenceLedger(
+            database=self.database,
+            scope_id=self.scope_id,
+            sources=self.repositories.sources,
+            artifacts=self.repositories.artifacts,
+            recurrence=self.repositories.recurrence,
+            evidence=self.evidence(),
         )
 
     def generation(self) -> ReviewedGenerationService:
@@ -449,7 +478,10 @@ class _ScopedServices:
             memory_service=memory_service,
             cursors=self.repositories.cursors,
             repository=self.repositories.statistics,
+            recurrence=self.repositories.recurrence,
+            artifacts=self.repositories.artifacts,
             token_estimator=None if self.token_estimator is None else self.token_estimator.profile,
+            model_usage=self.model_usage,
         )
 
     def recall_tokens(self) -> RelationalRecallTokenEstimator | None:
@@ -490,7 +522,11 @@ class RelationalContexts:
         embedding_model: EmbeddingModel | None = None,
         token_estimator: TokenEstimator | None = None,
         memory_reranker: MemoryReranker | None = None,
+        decision_model: DecisionModel | None = None,
         memory_rerank_candidate_limit: int = 30,
+        memory_capacity_budget: MemoryCapacityBudget | None = None,
+        memory_compaction: MemoryCompactionPolicy | None = None,
+        memory_max_history_revisions: int = 100,
         id_factory: IdFactory | None = None,
         handoff_artifact_id: str = "handoff",
         memory_artifact_id: str = "memory",
@@ -502,6 +538,9 @@ class RelationalContexts:
         handoff_verification_keys: tuple[bytes, ...] = (),
         topic_memory_write_timeout_seconds: float = 30.0,
         topic_memory_write_concurrency: int = 4,
+        model_usage_queue_capacity: int = 256,
+        model_usage_write_timeout_seconds: float = 1.0,
+        model_usage_flush_timeout_seconds: float = 0.5,
     ) -> None:
         self.database = database
         self.scopes = ScopeApplication(database, cursor_secret=cursor_secret)
@@ -532,10 +571,18 @@ class RelationalContexts:
             agent_skill_targets=RemoteAgentSkillTargetRepository(),
             skill_publications=SkillPublicationRepository(),
             statistics=StatisticsRepository(),
+            recurrence=RecurrenceRepository(),
             processing_pending=ArtifactProcessingPendingRepository(),
             processing_leases=ArtifactProcessingLeaseRepository(),
             processing_binding_states=ArtifactProcessingBindingStateRepository(),
             topic_memories=topic_memory_repository,
+        )
+        self._model_usage = _ModelUsageRecorder(
+            database,
+            self.repositories.statistics,
+            queue_capacity=model_usage_queue_capacity,
+            write_timeout_seconds=model_usage_write_timeout_seconds,
+            flush_timeout_seconds=model_usage_flush_timeout_seconds,
         )
         self._id_factory = _scoped_id_factory(memory_artifact_id, id_factory)
         self.prompt_registry = prompt_registry or PromptRegistry(
@@ -570,6 +617,7 @@ class RelationalContexts:
             PromptManagementWriter(self.repositories.artifacts, self.prompt_registry),
             ProfileManagementWriter(self.repositories.artifacts),
             MemoryManagementWriter(
+                capacity_budget=memory_capacity_budget,
                 database=database,
                 artifacts=self.repositories.artifacts,
                 index=self.index,
@@ -638,7 +686,13 @@ class RelationalContexts:
         self._embedding_model = embedding_model
         self._token_estimator = token_estimator
         self._memory_reranker = memory_reranker
+        self._decision_model = decision_model
         self._memory_rerank_candidate_limit = memory_rerank_candidate_limit
+        self._memory_capacity_budget = (
+            MemoryCapacityBudget() if memory_capacity_budget is None else memory_capacity_budget
+        )
+        self._memory_compaction = MemoryCompactionPolicy() if memory_compaction is None else memory_compaction
+        self._memory_max_history_revisions = memory_max_history_revisions
         self._handoff_artifact_id = handoff_artifact_id
         self._memory_artifact_id = memory_artifact_id
         self._tracing = tracing
@@ -713,39 +767,40 @@ class RelationalContexts:
     def model_usage_reporter(
         self, scope_id: str, /
     ) -> Callable[[ModelUsagePurpose, ModelUsageOperation, InferenceUsage], Awaitable[None]]:
-        """Return a best-effort usage callback for one operational Scope."""
+        """Return a best-effort usage callback for one operational Scope.
+
+        The callback only freezes and enqueues the record. The runtime-owned
+        recorder performs the independent short write; it never joins the
+        caller's transaction and never consumes the caller's model deadline.
+        """
 
         async def report(
             purpose: ModelUsagePurpose,
             operation: ModelUsageOperation,
             usage: InferenceUsage,
         ) -> None:
-            try:
-                await self.statistics(scope_id).record(
-                    purpose,
-                    operation,
-                    usage,
-                    datetime.now(UTC).date(),
-                )
-            except Exception as error:
-                # Usage is an operational side effect; a statistics outage
-                # must not turn a successful Artifact write into a failure.
-                log_safely(
-                    logger,
-                    logging.ERROR,
-                    "Model usage recording failed",
-                    exc_info=error,
-                    extra={
-                        "event": "statistics.model_usage.failed",
-                        "scope_id": scope_id,
-                        "purpose": purpose.value,
-                        "operation": operation.value,
-                        "outcome": "failure",
-                        "unit": "statistics",
-                    },
-                )
+            self._model_usage.offer(scope_id, purpose, operation, usage, datetime.now(UTC).date())
 
         return report
+
+    async def aclose_usage_recorder(self) -> None:
+        """Drain the usage recorder after its producers and before the database.
+
+        Ordering is load-bearing: closing the database first would reject the
+        recorder's own write, and closing this before producers stop would drop
+        records that were already accepted.
+        """
+
+        await self._model_usage.close()
+
+    async def flush_model_usage(self) -> None:
+        """Make usage accepted so far visible at an operation's completion boundary.
+
+        The wait is bounded and covers only the records already accepted, so a
+        continuously producing runtime cannot stall a completing operation.
+        """
+
+        await self._model_usage.flush()
 
     async def register_source_definition(
         self,
@@ -836,11 +891,28 @@ class RelationalContexts:
     ) -> tuple[ExperienceSearchHit, ...]:
         """Recall relevant approved Experience heads in one scope."""
 
+        return (await self.search_experience_outcome(scope_id, query, limit)).hits
+
+    async def search_experience_outcome(
+        self,
+        scope_id: str,
+        query: str,
+        limit: int,
+        /,
+        *,
+        admission: AdmissionFloor | None = None,
+    ) -> ExperienceSearchOutcome:
+        """Recall Experience heads and include internal admission accounting.
+
+        The outcome carries the admission counts alongside the hits so the recall gate can
+        report retrieved-versus-admitted without a second pass.
+        """
+
         if limit < 1:
             raise ValueError("Experience search limit must be positive")  # noqa: TRY003
         scope = validate_scope_id(scope_id)
         async with self.database.transaction() as connection:
-            return await self.experience_index.search(connection, scope, query, limit)
+            return await self.experience_index.search(connection, scope, query, limit, admission=admission)
 
     async def get_topic_memory(
         self,
@@ -902,9 +974,14 @@ class RelationalContexts:
         mode: TopicMemorySearchMode = "auto",
         query_vector: tuple[float, ...] | None = None,
         embedding_profile: EmbeddingProfile | None = None,
+        admission: AdmissionFloor | None = None,
+        query_embedding: MemoryQueryEmbedding | None = None,
     ) -> TopicMemorySearchResult:
         """Search current active Topic projections in this deployment."""
 
+        if query_embedding is not None:
+            query_vector = query_embedding.query_vector
+            embedding_profile = query_embedding.embedding_profile
         scope = validate_scope_id(scope_id)
         async with self.database.transaction() as connection:
             return await self.repositories.topic_memories.search(
@@ -915,6 +992,7 @@ class RelationalContexts:
                 mode=mode,
                 query_vector=query_vector,
                 embedding_profile=embedding_profile,
+                admission=admission,
             )
 
     async def search_skills(
@@ -1352,6 +1430,10 @@ class RelationalContexts:
             embedding_model=self._embedding_model,
             memory_reranker=self._memory_reranker,
             memory_rerank_candidate_limit=self._memory_rerank_candidate_limit,
+            decision_model=self._decision_model,
+            memory_capacity_budget=self._memory_capacity_budget,
+            memory_compaction=self._memory_compaction,
+            memory_max_history_revisions=self._memory_max_history_revisions,
             id_factory=self._id_factory,
             handoff_artifact_id=self._handoff_artifact_id,
             memory_artifact_id=self._memory_artifact_id,
@@ -1360,6 +1442,7 @@ class RelationalContexts:
             generation_receipts=self._generation_receipts,
             token_estimator=self._token_estimator,
             source_registry=self.source_registry,
+            model_usage=self._model_usage,
         )
 
 
@@ -1790,6 +1873,21 @@ class _RelationalExperienceIncubator:
                     )
                     candidate_ids.append(candidate.candidate_id)
                     candidates.append(candidate)
+                for proposal in await self._services.recurrence_ledger().record_window(connection, eligible_rows):
+                    target_content = await self._services.repositories.artifacts.get(
+                        connection,
+                        self._services.scope_id,
+                        proposal.target,
+                    )
+                    candidate = await review.propose_experience(
+                        proposal.proposal,
+                        sources=proposal.sources,
+                        artifacts=(target_content.as_ref(),),
+                        target=proposal.target,
+                        reason=proposal.reason,
+                    )
+                    candidate_ids.append(candidate.candidate_id)
+                    candidates.append(candidate)
                 await self._services.repositories.cursors.save(
                     connection,
                     self._services.scope_id,
@@ -1806,7 +1904,7 @@ class _RelationalExperienceIncubator:
                 high_watermark=high_watermark,
                 current_cursor=action.through,
                 source_count=len(eligible_rows),
-                candidate_count=len(plans),
+                candidate_count=len(candidate_ids),
                 candidate_ids=tuple(candidate_ids),
             )
 

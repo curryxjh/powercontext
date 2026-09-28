@@ -63,9 +63,11 @@ from powercontext.builtin.artifacts.memory.errors import (
     InvalidMemoryCandidateError,
     InvalidMemoryCitationError,
     InvalidMemoryEvidenceError,
+    MemoryCapacityExceededError,
     MemoryEntryInactiveError,
     MemoryEntryNotFoundError,
 )
+from powercontext.builtin.artifacts.memory.models import MemoryCapacity as RuntimeMemoryCapacity
 from powercontext.builtin.artifacts.prompt import GeneratePromptDemonstrations, PromptError
 from powercontext.builtin.artifacts.skill import (
     AgentKind,
@@ -117,6 +119,9 @@ from powercontext.builtin.artifacts.topic_memory import (
     TopicMemoryCurrentItem,
     TopicMemorySearchResult,
 )
+from powercontext.builtin.code.application import CodeApplication
+from powercontext.builtin.code.errors import CodeError
+from powercontext.builtin.code.models import CodeQueryRequest as RuntimeCodeQueryRequest
 from powercontext.builtin.dream.application import DreamApplication
 from powercontext.builtin.dream.models import CreateDreamRunRequest as RuntimeCreateDreamRunRequest
 from powercontext.builtin.dream.models import DreamError
@@ -405,6 +410,8 @@ from powercontext.http import (
     CaptureContentSourceResponse,
     ClearScopeBindingRequest,
     ClearScopeBindingResponse,
+    CodeQueryRequest,
+    CodeQueryResponse,
     CommitConnectorCheckpointRequest,
     CommitHandoffRequest,
     CommittedHandoff,
@@ -443,6 +450,7 @@ from powercontext.http import (
     GetConnectorCheckpointRequest,
     GetExperienceRequest,
     GetHandoffReportRequest,
+    GetMemoryCapacityRequest,
     GetMemoryEntryRequest,
     GetSkillPackageRequest,
     GetSkillRequest,
@@ -474,6 +482,7 @@ from powercontext.http import (
     ListRemoteSkillTargetsResponse,
     ListScopesRequest,
     ListSourcesRequest,
+    MemoryCapacity,
     MemoryEntry,
     MemoryEntryAccessSelector,
     MemoryMutationResponse,
@@ -672,6 +681,7 @@ from powercontext.http._generated.operations import (
     GET_EXPERIENCE,
     GET_HANDOFF_REPORT,
     GET_LIVENESS,
+    GET_MEMORY_CAPACITY,
     GET_MEMORY_ENTRY,
     GET_MEMORY_ENTRY_TAGS,
     GET_PROFILE_POLICY,
@@ -710,6 +720,7 @@ from powercontext.http._generated.operations import (
     PUBLISH_REMOTE_SKILL,
     PUT_PROFILE_POLICY,
     QUERY_ARTIFACT_TAGS,
+    QUERY_CODE,
     RECONCILE_REMOTE_SKILLS,
     RECORD_REMOTE_SKILL_RECEIPT,
     RECORD_SKILL_USAGE,
@@ -1146,6 +1157,8 @@ class _WorkApplication(Protocol):
 
 
 class _ScopedMemoryApplication(Protocol):
+    async def capacity(self) -> RuntimeMemoryCapacity: ...
+
     async def remember(self, request: RuntimeRememberMemoryRequest, /) -> MemoryMutationResult: ...
 
     async def search(self, request: RuntimeSearchMemoryRequest, /) -> MemorySearchPage: ...
@@ -1214,6 +1227,7 @@ class ServerApplication(Protocol):
     sources: _SourceApplication
     records: _RecordApplication
     ingestion: _RemoteIngestionApplication
+    code: CodeApplication
     context: _ContextApplication
     experience: _ExperienceApplication
     external_skills: _ExternalSkillApplication
@@ -1407,6 +1421,7 @@ def create_app(
     _add_route(app, REMEMBER_MEMORY, remember_memory)
     _add_route(app, SEARCH_MEMORY, search_memory)
     _add_route(app, PREPARE_CONTEXT, prepare_context)
+    _add_route(app, QUERY_CODE, query_code)
     _add_route(app, CREATE_WORK_CONTRACT, create_work_contract)
     _add_route(app, HANDOFF_CURRENT_WORK, handoff_current_work)
     _add_route(app, ACKNOWLEDGE_HANDOFF, acknowledge_handoff)
@@ -1417,6 +1432,7 @@ def create_app(
     _add_route(app, COMMIT_HANDOFF, commit_handoff)
     _add_route(app, CONTINUE_HANDOFF, continue_handoff)
     _add_route(app, LIST_MEMORY_ENTRIES, list_memory_entries)
+    _add_route(app, GET_MEMORY_CAPACITY, get_memory_capacity)
     _add_route(app, GET_MEMORY_ENTRY, get_memory_entry)
     _add_route(app, REVISE_MEMORY_ENTRY, revise_memory_entry)
     _add_route(app, RETIRE_MEMORY_ENTRY, retire_memory_entry)
@@ -2878,6 +2894,19 @@ async def search_memory(
     return mapping.search_response(result)
 
 
+async def query_code(
+    scope_id: Annotated[str, Path(min_length=1, max_length=256, pattern=r".*\S.*")],
+    request: CodeQueryRequest,
+    application: Annotated[ServerApplication, Depends(_require_application)],
+) -> CodeQueryResponse:
+    try:
+        query = RuntimeCodeQueryRequest.model_validate_json(request.model_dump_json(exclude_unset=True))
+    except ValueError as error:
+        raise CodeError("invalid_code_request", status=422) from error
+    result = await application.code.for_scope(scope_id).query(query)
+    return CodeQueryResponse.model_validate_json(result.model_dump_json(by_alias=True))
+
+
 async def prepare_context(
     request: PrepareContextRequest,
     application: Annotated[ServerApplication, Depends(_require_application)],
@@ -3062,6 +3091,14 @@ async def continue_handoff(
             raise InvalidRuntimeRequestError("handoff-selection")
         result = await handoff.continue_from(mapping.runtime_artifact_reference(revision))
     return mapping.handoff_resolution_response(result)
+
+
+async def get_memory_capacity(
+    request: GetMemoryCapacityRequest,
+    application: Annotated[ServerApplication, Depends(_require_application)],
+) -> MemoryCapacity:
+    result = await application.memory.for_scope(request.scope_id).capacity()
+    return MemoryCapacity.model_validate_json(result.model_dump_json())
 
 
 async def list_memory_entries(
@@ -4297,6 +4334,7 @@ def _add_route(
 _COLLECTION_CONTENT_OPERATIONS = frozenset({
     "search_memory",
     "list_memory_entries",
+    "get_memory_capacity",
     "list_memory_changes",
     "prepare_context",
     "list_managed_skills",
@@ -4347,6 +4385,37 @@ async def require_scope_content_ready(request: Request, scope_id: str) -> None:
             raise AccessUnavailableError("artifact_owner_pending")
 
 
+async def _check_missing_memory_reads(
+    request: Request,
+    access: AccessControlService,
+    checks: Sequence[tuple[AccessAction, ResourceRef]],
+    context: AccessAuditContext,
+) -> None:
+    # A missing owner alone cannot distinguish an absent entry from a pending
+    # owner write. Inspect identities only after authorizing the parent Scope.
+    for action, resource in checks:
+        if (
+            action is not AccessAction.ARTIFACT_READ
+            or resource.family != "memory"
+            or resource.scope_id is None
+            or not isinstance(resource.selector, MemoryEntrySelector)
+        ):
+            continue
+        decision = await access.check(
+            current_principal(), AccessAction.SCOPE_READ, ResourceRef.scope(resource.scope_id), context=context
+        )
+        if not decision.allowed:
+            continue
+        identities = await _require_application(request).records.for_scope(resource.scope_id).logical_artifacts()
+        if not any(
+            identity.family == resource.family
+            and identity.artifact_id == resource.artifact_id
+            and identity.entry_id == resource.selector.entry_id
+            for identity in identities
+        ):
+            raise MemoryEntryNotFoundError(resource.selector.entry_id)
+
+
 def _authorization_dependency(
     operation: Operation[Any, Any],
 ) -> Callable[[Request], Awaitable[None]]:
@@ -4365,11 +4434,16 @@ def _authorization_dependency(
             context = _access_audit_context(operation.operation_id)
             for scope_id in sorted({resource.scope_id for _, resource in checks if resource.scope_id is not None}):
                 await access.bootstrap_static_scope(current_principal(), scope_id, context=context)
-            if len(checks) == 1:
-                action, resource = checks[0]
-                await access.require(current_principal(), action, resource, context=context)
-            else:
-                await access.require_all(current_principal(), checks, context=context)
+            try:
+                if len(checks) == 1:
+                    action, resource = checks[0]
+                    await access.require(current_principal(), action, resource, context=context)
+                else:
+                    await access.require_all(current_principal(), checks, context=context)
+            except AccessUnavailableError as error:
+                if error.code == "artifact_owner_pending":
+                    await _check_missing_memory_reads(request, access, checks, context)
+                raise
             if operation.operation_id in _COLLECTION_CONTENT_OPERATIONS:
                 for scope_id in sorted({
                     resource.scope_id
@@ -4690,9 +4764,13 @@ def _path_artifact_tags_write_access(
     payload: Mapping[str, Any],
     _deployment_id: str,
 ) -> tuple[tuple[AccessAction, ResourceRef], ...]:
-    if _path_artifact_family(payload) in {BaseArtifactFamily.MEMORY.value, "topic-memory"}:
-        # The Memory container has no single entry owner; its shared metadata
-        # belongs to the Scope administrator.
+    if _path_artifact_family(payload) in {
+        BaseArtifactFamily.MEMORY.value,
+        BaseArtifactFamily.PROMPT.value,
+        "topic-memory",
+    }:
+        # Scope-owned knowledge and configuration metadata require current
+        # Scope administration, even if an Artifact owner binding remains.
         return _path_scope_access(payload, action=AccessAction.SCOPE_ADMIN)
     return _path_artifact_access(payload, action=AccessAction.ARTIFACT_WRITE)
 
@@ -5094,6 +5172,8 @@ def _set_error_headers(response: Response, error: Exception) -> None:
 
 
 def _map_error(error: Exception) -> tuple[int, str, str, dict[str, Any] | None]:
+    if isinstance(error, CodeError):
+        return error.status, error.code, "The code query could not be completed.", None
     access_error = _map_access_error(error)
     if access_error is not None:
         return access_error
@@ -5405,10 +5485,9 @@ def _map_domain_error(error: Exception) -> tuple[int, str, str, dict[str, Any] |
         return status.HTTP_404_NOT_FOUND, "artifact_not_found", "The requested Artifact was not found.", None
     if isinstance(error, MemoryEntryNotFoundError):
         return status.HTTP_404_NOT_FOUND, "memory_not_found", "The requested Memory value was not found.", None
-    if isinstance(error, RevisionConflictError):
-        return status.HTTP_409_CONFLICT, "revision_conflict", "The Memory Revision is stale.", None
-    if isinstance(error, MemoryEntryInactiveError):
-        return status.HTTP_409_CONFLICT, "memory_entry_inactive", "The Memory entry is inactive.", None
+    memory_conflict = _map_memory_conflict_error(error)
+    if memory_conflict is not None:
+        return memory_conflict
     if isinstance(error, CapabilityNotSupportedError):
         return (
             status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -5427,12 +5506,42 @@ def _map_domain_error(error: Exception) -> tuple[int, str, str, dict[str, Any] |
             InvalidRuntimeRequestError,
         ),
     ):
-        return status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_request", "The request is invalid.", None
+        return (
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "invalid_request",
+            "The request is invalid.",
+            _invalid_request_details(error),
+        )
     if isinstance(error, InferenceTimeoutError):
         return status.HTTP_503_SERVICE_UNAVAILABLE, "inference_timeout", "Model inference timed out.", None
     if isinstance(error, InferenceUnavailableError):
         return status.HTTP_503_SERVICE_UNAVAILABLE, "inference_unavailable", "Model inference is unavailable.", None
     return status.HTTP_500_INTERNAL_SERVER_ERROR, "internal_error", "The Server failed.", None
+
+
+def _map_memory_conflict_error(error: Exception) -> tuple[int, str, str, dict[str, Any] | None] | None:
+    if isinstance(error, RevisionConflictError):
+        return status.HTTP_409_CONFLICT, "revision_conflict", "The Memory Revision is stale.", None
+    if isinstance(error, MemoryCapacityExceededError):
+        return (
+            status.HTTP_409_CONFLICT,
+            "memory_capacity_exceeded",
+            "The Memory has reached its capacity budget.",
+            {"dimension": error.dimension, "limit": error.limit, "observed": error.observed},
+        )
+    if isinstance(error, MemoryEntryInactiveError):
+        return status.HTTP_409_CONFLICT, "memory_entry_inactive", "The Memory entry is inactive.", None
+    return None
+
+
+def _invalid_request_details(error: Exception) -> dict[str, Any] | None:
+    if (
+        isinstance(error, InvalidMemoryCandidateError)
+        and error.code == "canonical"
+        and error.canonical_code is not None
+    ):
+        return {"code": error.canonical_code, "message": str(error.detail)}
+    return None
 
 
 def _map_source_ingestion_error(error: Exception) -> tuple[int, str, str, dict[str, Any] | None] | None:

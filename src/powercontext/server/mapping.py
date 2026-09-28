@@ -21,7 +21,13 @@ from typing import Any
 from pydantic import ValidationError
 
 from powercontext.artifacts import ArtifactRef
-from powercontext.builtin.artifacts.experience import Experience, ExperienceContent
+from powercontext.builtin.artifacts.experience import (
+    Experience,
+    ExperienceContent,
+    FailureRecord,
+    FailureSignature,
+    FailureVerification,
+)
 from powercontext.builtin.artifacts.handoff import HandoffCitation as RuntimeHandoffCitation
 from powercontext.builtin.artifacts.handoff.generation_metadata import (
     HandoffGenerationEnvelope,
@@ -263,7 +269,6 @@ from powercontext.http import (
     SourceDefinitionManifest,
     SourceObservationReceipt,
     SourceReference,
-    SourceType,
     SourceTypeReference,
     SubmitSourceObservationRequest,
     TaskCheck,
@@ -276,6 +281,15 @@ from powercontext.http import (
     WorkSourceReceipt,
 )
 from powercontext.http import ConnectorBinding as HttpConnectorBinding
+from powercontext.http import (
+    FailureRecord as TransportFailureRecord,
+)
+from powercontext.http import (
+    FailureSignature as TransportFailureSignature,
+)
+from powercontext.http import (
+    FailureVerification as TransportFailureVerification,
+)
 from powercontext.http import (
     HandoffActivation as TransportHandoffActivation,
 )
@@ -326,6 +340,7 @@ from powercontext.http import (
 from powercontext.http import (
     RememberMemoryRequest as TransportRememberMemoryRequest,
 )
+from powercontext.http import RepairSurface as TransportRepairSurface
 from powercontext.sources import (
     ConnectorBinding as RuntimeConnectorBinding,
 )
@@ -977,6 +992,21 @@ def experience_content(value: ExperienceProposal) -> ExperienceContent:
         action=value.action,
         outcome=value.outcome,
         lesson=value.lesson,
+        failure=None if value.failure is None else runtime_failure_record(value.failure),
+    )
+
+
+def runtime_failure_record(value: TransportFailureRecord) -> FailureRecord:
+    return FailureRecord(
+        signature=FailureSignature(
+            recall_cue=value.signature.recall_cue,
+            symptom=value.signature.symptom,
+        ),
+        repair_surface=value.repair_surface.value,
+        verification=FailureVerification(
+            condition=value.verification.condition,
+            check_subject=value.verification.check_subject,
+        ),
     )
 
 
@@ -986,6 +1016,21 @@ def experience_proposal(value: ExperienceContent) -> ExperienceProposal:
         action=value.action,
         outcome=value.outcome,
         lesson=value.lesson,
+        failure=None if value.failure is None else transport_failure_record(value.failure),
+    )
+
+
+def transport_failure_record(value: FailureRecord) -> TransportFailureRecord:
+    return TransportFailureRecord(
+        signature=TransportFailureSignature(
+            recall_cue=value.signature.recall_cue,
+            symptom=value.signature.symptom,
+        ),
+        repair_surface=TransportRepairSurface(value.repair_surface),
+        verification=TransportFailureVerification(
+            condition=value.verification.condition,
+            check_subject=value.verification.check_subject,
+        ),
     )
 
 
@@ -1058,7 +1103,7 @@ def runtime_source_reference(value: SourceReference) -> SourceRef:
 
 
 def source_type_reference(value: SourceRef) -> SourceTypeReference:
-    return SourceTypeReference(source_type=SourceType(value.source_type), source_id=value.source_id)
+    return SourceTypeReference(source_type=value.source_type, source_id=value.source_id)
 
 
 def runtime_source_type_reference(value: SourceTypeReference) -> SourceRef:

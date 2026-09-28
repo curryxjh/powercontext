@@ -39,6 +39,8 @@ from powercontext.builtin.artifacts.memory import (
     CandidatePipeline,
     DefaultMemoryEvidenceProjector,
     MemoryCapabilities,
+    MemoryCapacityBudget,
+    MemoryCompactionPolicy,
     MemoryHit,
     MemoryRerankDecision,
     MemoryReranker,
@@ -59,6 +61,7 @@ from powercontext.builtin.artifacts.topic_memory.generation import (
     topic_memory_stage_budget,
     validate_topic_memory_stage_capacity,
 )
+from powercontext.builtin.code.configuration import open_code_service
 from powercontext.builtin.dream.generation import (
     DREAM_INSTRUCTIONS,
     DreamGenerationInput,
@@ -110,7 +113,12 @@ from powercontext.builtin.persistence.topic_memory_index import (
     TopicMemoryIndex,
 )
 from powercontext.builtin.runtime._scope_cache import ScopeCacheObserver
-from powercontext.builtin.runtime.application import BuiltinRuntime, ScheduledExperienceRunner, ScheduledSourceRunner
+from powercontext.builtin.runtime.application import (
+    BuiltinRuntime,
+    RecallEffortSink,
+    ScheduledExperienceRunner,
+    ScheduledSourceRunner,
+)
 from powercontext.builtin.runtime.artifact_processing import (
     ArtifactProcessingBinding,
     ArtifactProcessingSupervisor,
@@ -118,6 +126,16 @@ from powercontext.builtin.runtime.artifact_processing import (
     SpawnArtifactProcessingWorkerLauncher,
 )
 from powercontext.builtin.runtime.config import BuiltinConfig, ExternalSkillsConfig, InferenceConfig, RuntimeConfig
+from powercontext.builtin.runtime.decision_model import (
+    DECISION_INSTRUCTIONS,
+    DecisionInput,
+    DecisionModel,
+    DecisionOutput,
+    DecisionRequest,
+    DecisionResult,
+    FailOpenDecisionModel,
+    LLMDecisionModel,
+)
 from powercontext.builtin.runtime.family_processing import FAMILY_BINDINGS, FamilyWorkerSpec, run_family_worker
 from powercontext.builtin.runtime.models import MemorySearchMode, RuntimeCapabilities
 from powercontext.builtin.runtime.processing_discovery import SourceProcessingPendingProvider, enabled_profile_scopes
@@ -134,6 +152,7 @@ from powercontext.builtin.runtime.readiness import (
     RuntimeReadinessChecks,
     dependency_readiness_probe,
 )
+from powercontext.builtin.runtime.recall_sufficiency import RecallSufficiencyPolicy
 from powercontext.builtin.runtime.relational import RelationalContexts
 from powercontext.builtin.runtime.topic_memory_processing import (
     TopicMemoryWorkerSpec,
@@ -177,7 +196,7 @@ class BuiltinConfigurationError(RuntimeError):
                 "Topic Memory processing requires child-reconstructible inference resources"
             ),
             "topic-memory-generation-budget": "Topic Memory generation budget is not executable",
-            "topic-memory-provider-budget": "Topic Memory workers require OpenAI/Anthropic SDK providers with transport retries disabled and bounded stateless model settings",
+            "topic-memory-provider-budget": "Topic Memory workers require supported providers with transport retries disabled and bounded stateless model settings",
             "topic-memory-generation": "Topic Memory processing requires a configured generation model",
             "topic-memory-database": "Topic Memory workers require file-backed SQLite; an in-memory database cannot be shared with spawned workers",
             "artifact-processing-worker-authorization-provider": (
@@ -190,6 +209,9 @@ class BuiltinConfigurationError(RuntimeError):
             ),
             "artifact-processing-families": "Declared background families must have one matching registration and reconstructible models",
             "database": "unsupported built-in database",
+            "decision-model": (
+                "decision assistance requires a configured generation or decision model, or injected decision model"
+            ),
         }
         super().__init__(messages[issue])
 
@@ -251,6 +273,52 @@ class _TracingMemoryReranker:
             return decision
 
 
+class _TracingDecisionModel:
+    """Trace one configured decision backend without exposing question or evidence content."""
+
+    def __init__(self, delegate: DecisionModel, tracing: RuntimeTracing) -> None:
+        self._delegate = delegate
+        self._tracing = tracing
+        self.policy_id = delegate.policy_id
+
+    async def evaluate(self, request: DecisionRequest, /) -> DecisionResult:
+        with self._tracing.stage(
+            "decision.evaluate",
+            attributes={"powercontext.decision.kind": request.decision_kind},
+        ) as span:
+            result = await self._delegate.evaluate(request)
+            span.set_attributes({
+                "powercontext.decision.outcome": result.outcome.value,
+                "powercontext.decision.used_fallback": result.used_fallback,
+            })
+            return result
+
+
+def _fail_open_decision_model(
+    injected: DecisionModel | None,
+    generated: DecisionModel | None,
+    tracing: RuntimeTracing | None,
+    *,
+    timeout_seconds: float | None = None,
+) -> DecisionModel | None:
+    """Resolve the decision backend, always exposing it fail-open wrapped with tracing outermost."""
+
+    backend = injected if injected is not None else generated
+    if backend is None:
+        return None
+    delegate: DecisionModel = FailOpenDecisionModel(backend, timeout_seconds=timeout_seconds)
+    if tracing is not None:
+        delegate = _TracingDecisionModel(delegate, tracing)
+    return delegate
+
+
+def _require_decision_backend(runtime: RuntimeConfig, configured: DecisionModel | None) -> None:
+    """Reject an enabled decision role that resolved to no backend at all."""
+
+    if runtime.decision_assistance_enabled and configured is None:
+        raise BuiltinConfigurationError("decision-model")
+
+
 @asynccontextmanager
 async def open_builtin_runtime(
     config: BuiltinConfig,
@@ -270,6 +338,7 @@ async def open_builtin_runtime(
     embedding_model: EmbeddingModel | None = None,
     token_estimator: TokenEstimator | None = None,
     memory_reranker: MemoryReranker | None = None,
+    decision_model: DecisionModel | None = None,
     instrumentation: InstrumentationSettings | None = None,
     scope_cache_observer: ScopeCacheObserver | None = None,
     topic_memory_search_observer: Callable[[str, bool], None] | None = None,
@@ -282,6 +351,7 @@ async def open_builtin_runtime(
     source_registry: SourceDefinitionRegistry | None = None,
     cursor_secret: bytes | None = None,
     handoff_verification_keys: tuple[bytes, ...] = (),
+    recall_effort_sink: RecallEffortSink | None = None,
 ) -> AsyncIterator[BuiltinRuntime]:
     """Open the selected database, inference adapters, and built-in runtime."""
 
@@ -297,8 +367,10 @@ async def open_builtin_runtime(
             generated_skill,
             generated_handoff,
             generated_reranker,
+            generated_decision,
             generation_readiness,
             rerank_readiness,
+            decision_readiness,
         ) = (
             await _generation_pipelines(
                 config.inference,
@@ -316,8 +388,9 @@ async def open_builtin_runtime(
                 or skill_generator is None
                 or handoff_pipeline is None
                 or (config.runtime.memory_rerank_enabled and memory_reranker is None)
+                or (config.runtime.decision_assistance_enabled and decision_model is None)
             )
-            else (None, None, None, None, None, None, None, None, None)
+            else (None, None, None, None, None, None, None, None, None, None, None)
         )
         configured_pipeline = generated_memory if candidate_pipeline is None else candidate_pipeline
         configured_incubation = generated_incubation if experience_pipeline is None else experience_pipeline
@@ -342,6 +415,14 @@ async def open_builtin_runtime(
         prompt_registry = _prompt_registry(config.runtime, components)
         if configured_reranker is not None and tracing is not None:
             configured_reranker = _TracingMemoryReranker(configured_reranker, tracing)
+        # The decision role is always exposed fail-open wrapped; tracing, when enabled, is outermost
+        # so its span records the final verdict including any degradation.
+        configured_decision = _fail_open_decision_model(
+            decision_model,
+            generated_decision,
+            tracing,
+            timeout_seconds=config.inference.decision_timeout_seconds or config.inference.generation_timeout_seconds,
+        )
         if embedding_model is None:
             configured_embedding_source, readiness_embedding = await _embedding_models(
                 config.inference,
@@ -375,6 +456,7 @@ async def open_builtin_runtime(
                 embedding_model=configured_embedding,
                 token_estimator=token_estimator,
                 memory_reranker=configured_reranker,
+                decision_model=configured_decision,
                 source_registry=configured_source_registry,
                 cursor_secret=cursor_secret,
                 tracing=tracing,
@@ -400,6 +482,7 @@ async def open_builtin_runtime(
         inference_readiness = (
             ("inference.generation", generation_readiness),
             ("inference.rerank", rerank_readiness),
+            ("inference.decision", decision_readiness),
             (
                 "inference.embedding",
                 None if readiness_embedding is None else _embedding_readiness_probe(readiness_embedding),
@@ -459,6 +542,7 @@ async def open_builtin_runtime(
         topic_memory_processing_available = _topic_memory_processing_available(config, processing_bindings)
         runtime = await resources.enter_async_context(
             BuiltinRuntime(
+                code_service=await resources.enter_async_context(open_code_service(config.code, config.database)),
                 provider=contexts,
                 capabilities=RuntimeCapabilities(
                     memory_extraction=contexts.memory_extraction,
@@ -472,6 +556,7 @@ async def open_builtin_runtime(
                 ),
                 source_window_limit=config.runtime.source_window_limit,
                 context_assembly_max_entries=config.runtime.context_assembly_max_entries,
+                recall_sufficiency_policy=RecallSufficiencyPolicy.from_runtime_config(config.runtime),
                 scope_cache_size=config.runtime.scope_cache_size,
                 scope_evictor=contexts.evict,
                 scope_cache_observer=scope_cache_observer,
@@ -490,7 +575,7 @@ async def open_builtin_runtime(
                     attest_candidate=dream_candidate_attester,
                 ),
                 generation_concurrency=config.runtime.generation_concurrency,
-                experience_recall=contexts.search_experience,
+                experience_recall=contexts.search_experience_outcome,
                 skill_recall=contexts.search_skills,
                 skill_lister=contexts.list_skills,
                 skill_origin_reader=contexts.get_skill_origins,
@@ -516,6 +601,8 @@ async def open_builtin_runtime(
                 record_service=contexts.records,
                 prompt_service=contexts.prompts,
                 recall_token_estimator=contexts.estimate_recall_tokens,
+                recall_effort_sink=recall_effort_sink,
+                decision_model=configured_decision,
                 publication_application=contexts.publications,
                 scope_application=contexts.scopes,
                 readiness=RuntimeReadinessChecks(readiness_probes),
@@ -536,6 +623,7 @@ async def open_builtin_runtime(
             )
         if config.runtime.memory_rerank_enabled and configured_reranker is None:
             raise BuiltinConfigurationError("memory-reranker")
+        _require_decision_backend(config.runtime, configured_decision)
         yield runtime
 
 
@@ -591,6 +679,12 @@ def _artifact_processing_bindings(  # noqa: C901 - validate and assemble one reg
     }
     for family, schedule in automatic.items():
         if schedule is not None and family not in declared | registered:
+            if (
+                family == "topic-memory"
+                and config.runtime.artifact_processing_families is None
+                and config.inference.generation_model is not None
+            ):
+                validate_topic_memory_provider_settings(config.inference)
             issue = {
                 "memory": "scheduled-pipeline",
                 "experience": "scheduled-experience-pipeline",
@@ -729,6 +823,7 @@ async def open_builtin_contexts(
     embedding_model: EmbeddingModel | None = None,
     token_estimator: TokenEstimator | None = None,
     memory_reranker: MemoryReranker | None = None,
+    decision_model: DecisionModel | None = None,
     source_registry: SourceDefinitionRegistry | None = None,
     cursor_secret: bytes | None = None,
     tracing: RuntimeTracing | None = None,
@@ -787,18 +882,37 @@ async def open_builtin_contexts(
                 embedding_model=embedding_model,
                 token_estimator=configured_token_estimator,
                 memory_reranker=memory_reranker,
+                decision_model=decision_model,
                 memory_rerank_candidate_limit=config.runtime.memory_rerank_candidate_limit,
+                memory_capacity_budget=MemoryCapacityBudget(
+                    max_active_entries=config.runtime.memory_max_active_entries,
+                    max_manifest_entries=config.runtime.memory_max_manifest_entries,
+                    max_manifest_bytes=config.runtime.memory_max_manifest_bytes,
+                ),
+                memory_compaction=MemoryCompactionPolicy(
+                    enabled=config.runtime.memory_compaction_enabled,
+                    min_tombstone_revisions=config.runtime.memory_compaction_min_tombstone_revisions,
+                ),
+                memory_max_history_revisions=config.runtime.memory_max_history_revisions,
                 prompt_registry=prompt_registry,
                 prompt_demonstrators=prompt_demonstrators,
                 handoff_verification_keys=handoff_verification_keys,
                 topic_memory_write_timeout_seconds=config.inference.embedding_timeout_seconds,
                 topic_memory_write_concurrency=config.runtime.generation_concurrency,
+                model_usage_queue_capacity=config.runtime.model_usage_queue_capacity,
+                model_usage_write_timeout_seconds=config.runtime.model_usage_write_timeout_seconds,
+                model_usage_flush_timeout_seconds=config.runtime.model_usage_flush_timeout_seconds,
                 source_registry=source_registry,
                 cursor_secret=cursor_secret,
                 tracing=tracing,
             )
-            await contexts.scopes.bootstrap_default()
-            yield contexts
+            try:
+                await contexts.scopes.bootstrap_default()
+                yield contexts
+            finally:
+                # Producers are stopped by now, and the profile below still owns
+                # the database this recorder writes into.
+                await contexts.aclose_usage_recorder()
         return
     experience_index = OceanBaseExperienceFTSIndex()
     indexes = [OceanBaseMemoryFTSIndex()]
@@ -844,18 +958,37 @@ async def open_builtin_contexts(
             embedding_model=embedding_model,
             token_estimator=configured_token_estimator,
             memory_reranker=memory_reranker,
+            decision_model=decision_model,
             memory_rerank_candidate_limit=config.runtime.memory_rerank_candidate_limit,
+            memory_capacity_budget=MemoryCapacityBudget(
+                max_active_entries=config.runtime.memory_max_active_entries,
+                max_manifest_entries=config.runtime.memory_max_manifest_entries,
+                max_manifest_bytes=config.runtime.memory_max_manifest_bytes,
+            ),
+            memory_compaction=MemoryCompactionPolicy(
+                enabled=config.runtime.memory_compaction_enabled,
+                min_tombstone_revisions=config.runtime.memory_compaction_min_tombstone_revisions,
+            ),
+            memory_max_history_revisions=config.runtime.memory_max_history_revisions,
             prompt_registry=prompt_registry,
             prompt_demonstrators=prompt_demonstrators,
             handoff_verification_keys=handoff_verification_keys,
             topic_memory_write_timeout_seconds=config.inference.embedding_timeout_seconds,
             topic_memory_write_concurrency=config.runtime.generation_concurrency,
+            model_usage_queue_capacity=config.runtime.model_usage_queue_capacity,
+            model_usage_write_timeout_seconds=config.runtime.model_usage_write_timeout_seconds,
+            model_usage_flush_timeout_seconds=config.runtime.model_usage_flush_timeout_seconds,
             source_registry=source_registry,
             cursor_secret=cursor_secret,
             tracing=tracing,
         )
-        await contexts.scopes.bootstrap_default()
-        yield contexts
+        try:
+            await contexts.scopes.bootstrap_default()
+            yield contexts
+        finally:
+            # Producers are stopped by now, and the profile below still owns the
+            # database this recorder writes into.
+            await contexts.aclose_usage_recorder()
 
 
 def _register_prompt_demonstrators(
@@ -950,11 +1083,17 @@ async def _generation_pipelines(
     SkillGenerator | None,
     HandoffGenerationPipeline | None,
     MemoryReranker | None,
+    DecisionModel | None,
+    ReadinessProbe | None,
     ReadinessProbe | None,
     ReadinessProbe | None,
 ]:
-    if settings.generation_model is None and (not runtime.memory_rerank_enabled or settings.rerank_model is None):
-        return None, None, None, None, None, None, None, None, None
+    if (
+        settings.generation_model is None
+        and (not runtime.memory_rerank_enabled or settings.rerank_model is None)
+        and not (runtime.decision_assistance_enabled and settings.decision_model is not None)
+    ):
+        return (None, None, None, None, None, None, None, None, None, None, None)
 
     from pydantic_ai.settings import ModelSettings, merge_model_settings
 
@@ -1203,6 +1342,15 @@ async def _generation_pipelines(
                     )
                 )
 
+    generated_decision, decision_readiness = await _generation_decision(
+        settings,
+        runtime,
+        resources,
+        instrumentation,
+        generation_provider_model=generation_provider_model,
+        generation_model=generation_model,
+    )
+
     return (
         generated_profile,
         generated_memory,
@@ -1211,9 +1359,101 @@ async def _generation_pipelines(
         generated_skill,
         generated_handoff,
         generated_reranker,
+        generated_decision,
         generation_readiness,
         rerank_readiness,
+        decision_readiness,
     )
+
+
+async def _generation_decision(
+    settings: InferenceConfig,
+    runtime: RuntimeConfig,
+    resources: AsyncExitStack,
+    instrumentation: InstrumentationSettings | None,
+    *,
+    generation_provider_model: Model | None,
+    generation_model: Model | None,
+) -> tuple[DecisionModel | None, ReadinessProbe | None]:
+    """Build the opt-in decision backend, reusing the generation model when not overridden."""
+
+    if not runtime.decision_assistance_enabled:
+        return None, None
+
+    from pydantic_ai.settings import ModelSettings, merge_model_settings
+
+    from powercontext.builtin.inference.pydantic_ai import (
+        InferenceLimits,
+        PydanticAIStructuredGenerator,
+        probe_pydantic_ai_model,
+    )
+
+    decision_provider_model = generation_provider_model
+    decision_model = generation_model
+    inherits_generation = settings.decision_model is None
+    decision_headers = (
+        _merge_headers(settings.generation_headers, settings.decision_headers)
+        if inherits_generation
+        else settings.decision_headers
+    )
+    separate_decision_model = settings.decision_model is not None or bool(settings.decision_headers)
+    if separate_decision_model:
+        decision_model_name = settings.decision_model or settings.generation_model
+        if decision_model_name is None:
+            raise BuiltinConfigurationError("decision-model")
+        decision_provider_model, decision_model = await _open_pydantic_ai_model(
+            decision_model_name,
+            base_url=settings.decision_base_url
+            if settings.decision_model is not None
+            else settings.generation_base_url,
+            headers=decision_headers,
+            resources=resources,
+            instrumentation=instrumentation,
+        )
+    if decision_provider_model is None or decision_model is None:
+        return None, None
+    decision_values = (
+        settings.generation_model_settings | settings.decision_model_settings
+        if inherits_generation
+        else settings.decision_model_settings
+    )
+    decision_request_settings = cast(ModelSettings, dict(decision_values))
+    decision_request_settings = merge_model_settings(
+        decision_request_settings,
+        ModelSettings(temperature=0.0),
+    )
+    decision_generator = PydanticAIStructuredGenerator(
+        model=decision_model,
+        instructions=DECISION_INSTRUCTIONS,
+        input_type=DecisionInput,
+        output_type=DecisionOutput,
+        limits=InferenceLimits(
+            timeout_seconds=settings.decision_timeout_seconds or settings.generation_timeout_seconds,
+            max_requests=settings.decision_max_requests or settings.generation_max_requests,
+        ),
+        model_settings=decision_request_settings,
+        name="decision_evaluate",
+    )
+    generated_decision = LLMDecisionModel(UsageReportingStructuredGenerator(decision_generator))
+
+    decision_readiness: ReadinessProbe | None = None
+    if separate_decision_model or settings.decision_model_settings:
+
+        async def probe_decision() -> None:
+            timeout_seconds = settings.decision_timeout_seconds or settings.generation_timeout_seconds
+            await probe_pydantic_ai_model(
+                decision_provider_model,
+                timeout_seconds=timeout_seconds,
+                model_settings=decision_request_settings,
+            )
+
+        decision_readiness = CachedReadinessProbe(
+            dependency_readiness_probe(
+                probe_decision,
+                timeout_seconds=settings.decision_timeout_seconds or settings.generation_timeout_seconds,
+            )
+        )
+    return generated_decision, decision_readiness
 
 
 async def preflight_builtin_runtime(config: BuiltinConfig) -> None:
@@ -1237,6 +1477,10 @@ async def preflight_builtin_runtime(config: BuiltinConfig) -> None:
             config.inference.generation_model is None and config.inference.rerank_model is None
         ):
             raise BuiltinConfigurationError("memory-reranker")
+        if config.runtime.decision_assistance_enabled and (
+            config.inference.generation_model is None and config.inference.decision_model is None
+        ):
+            raise BuiltinConfigurationError("decision-model")
 
 
 async def _open_pydantic_ai_model(
@@ -1401,6 +1645,17 @@ def _usage_reporting_embedding_model(model: EmbeddingModel | None) -> EmbeddingM
     return UsageReportingEmbeddingModel(model)
 
 
+def _embedding_provider_settings(settings: InferenceConfig, dimension: int) -> dict[str, JsonValue]:
+    """Return embedding request settings, keeping stored dimension separate from the wire field."""
+
+    request_settings = dict(settings.embedding_model_settings)
+    if settings.embedding_send_dimensions:
+        request_settings["dimensions"] = dimension
+    else:
+        request_settings.pop("dimensions", None)
+    return request_settings
+
+
 async def _embedding_models(
     settings: InferenceConfig,
     resources: AsyncExitStack,
@@ -1410,6 +1665,14 @@ async def _embedding_models(
 ) -> tuple[EmbeddingModel | None, EmbeddingModel | None]:
     if settings.embedding_model is None:
         return None, None
+
+    from powercontext.builtin.inference.minimax import is_minimax_embedding
+
+    if is_minimax_embedding(
+        str(settings.embedding_base_url) if settings.embedding_base_url is not None else None,
+        settings.embedding_model,
+    ):
+        return _minimax_embedding_models(settings, resources, instrumentation)
 
     from pydantic_ai import Embedder
     from pydantic_ai.embeddings import EmbeddingSettings, infer_embedding_model
@@ -1444,7 +1707,7 @@ async def _embedding_models(
     limits = InferenceLimits(timeout_seconds=settings.embedding_timeout_seconds)
     embedding_settings = cast(
         EmbeddingSettings,
-        settings.embedding_model_settings | {"dimensions": profile.dimension},
+        _embedding_provider_settings(settings, profile.dimension),
     )
 
     def adapter(instrument: InstrumentationSettings | bool | None) -> EmbeddingModel:
@@ -1457,6 +1720,49 @@ async def _embedding_models(
 
     # Readiness runs outside an application operation, so use the same provider model
     # without instrumentation to avoid exporting an orphan inference span.
+    return adapter(instrumentation), adapter(False)
+
+
+def _minimax_embedding_models(
+    settings: InferenceConfig,
+    resources: AsyncExitStack,
+    instrumentation: InstrumentationSettings | None,
+) -> tuple[EmbeddingModel | None, EmbeddingModel | None]:
+    """Build operational and readiness MiniMax embedding adapters.
+
+    MiniMax is detected by host or model prefix and requires an explicit base URL
+    plus a header secret, both already supplied by the inference configuration.
+    """
+
+    from powercontext.builtin.artifacts.memory import EmbeddingProfile
+    from powercontext.builtin.inference.minimax import MiniMaxEmbeddingModel, _embedding_model_name
+
+    if settings.embedding_model is None or settings.embedding_base_url is None:
+        raise BuiltinConfigurationError("inference-endpoint-provider")
+    profile = EmbeddingProfile(
+        profile_id=_required(settings.embedding_profile_id),
+        model=settings.embedding_model,
+        dimension=_required(settings.embedding_dimension),
+        distance="l2",
+        normalization=settings.embedding_normalization,
+    )
+    headers = _resolve_headers(settings.embedding_headers) if settings.embedding_headers else None
+    model_name = _embedding_model_name(settings.embedding_model)
+
+    def adapter(instrument: InstrumentationSettings | bool | None) -> EmbeddingModel:
+        model = MiniMaxEmbeddingModel(
+            base_url=str(settings.embedding_base_url),
+            model=model_name,
+            headers=headers,
+            profile=profile,
+            batch_size=settings.embedding_batch_size,
+            timeout_seconds=settings.embedding_timeout_seconds,
+        )
+        resources.push_async_callback(model.aclose)
+        return model
+
+    # MiniMax has no OpenTelemetry instrumentation hook; readiness uses the same
+    # instance kind as the operational adapter.
     return adapter(instrumentation), adapter(False)
 
 
