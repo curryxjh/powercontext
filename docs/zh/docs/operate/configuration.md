@@ -45,7 +45,7 @@ Server 配置使用 `POWERCONTEXT_SERVER_` 前缀。
 | `POWERCONTEXT_SERVER_WORKSPACE` | Server 启动目录 | 本机项目级 Agent Skill 目录的解析根目录 |
 | `POWERCONTEXT_SERVER_MCP_ENABLED` | `true` | 启用 Streamable HTTP MCP |
 | `POWERCONTEXT_SERVER_MCP_PATH` | `/mcp` | MCP 路径 |
-| `POWERCONTEXT_SERVER_DASHBOARD_ENABLED` | `false` | 个人与演示 Dashboard；要求静态 Bearer 鉴权，不支持注入认证或授权 Provider |
+| `POWERCONTEXT_SERVER_DASHBOARD_ENABLED` | `false` | 个人与演示 Dashboard；本地 `ACCESS_MODE=disabled` 时无需 token，`enforced` 时要求静态 Bearer token；不支持注入认证或授权 Provider |
 | `POWERCONTEXT_SERVER_AUTH_ENABLED` | `false` | 旧静态 Bearer 兼容开关；`true` 自动映射为 `ACCESS_MODE=enforced`，并要求设置 `AUTH_TOKEN` |
 | `POWERCONTEXT_SERVER_AUTH_TOKEN` | 未设置 | 旧静态 Bearer token；未注入 Authentication Provider 时作为兼容认证并映射为内置管理员 |
 | `POWERCONTEXT_SERVER_ACCESS_MODE` | `disabled` | 唯一正式 Access 开关：`disabled` 或 `enforced` |
@@ -67,7 +67,7 @@ Server 配置使用 `POWERCONTEXT_SERVER_` 前缀。
 | `POWERCONTEXT_SERVER_DATABASE_PATH` | 用户数据目录下的 `seekdb` 目录 | 嵌入式 seekdb 路径；仅在 `DATABASE_KIND=seekdb` 时使用 |
 | `POWERCONTEXT_SERVER_DATABASE_BUSY_TIMEOUT_MS` | `5000` | 业务连接等待 SQLite 单一写锁的毫秒数；它不约束用量记账，后者有自己的有界预算 |
 | `POWERCONTEXT_SERVER_RUNTIME_SCOPE_CACHE_SIZE` | `128` | Runtime 保留的非活动 scope composition 数量；进行中的 scope 不会被驱逐 |
-| `POWERCONTEXT_SERVER_RUNTIME_SOURCE_WINDOW_LIMIT` | `100` | 单次 activation 最多处理的 Source 数量 |
+| `POWERCONTEXT_SERVER_RUNTIME_SOURCE_WINDOW_LIMIT` | `100` | 每次处理的 Source 日志位置上限；Memory 在生成超时后会缩小窗口 |
 | `POWERCONTEXT_SERVER_RUNTIME_CONTEXT_ASSEMBLY_MAX_ENTRIES` | `8` | 显式 `assembly.sections[].limit` 之和的上限；正整数，各类别单独上限仍适用 |
 | `POWERCONTEXT_SERVER_RUNTIME_MEMORY_EXTRACTION_PROFILE` | `coding` | Memory 选择策略：`coding` 或 `conversation` |
 | `POWERCONTEXT_SERVER_RUNTIME_MEMORY_RERANK_ENABLED` | `false` | 在 Memory 粗召回后应用 listwise rerank |
