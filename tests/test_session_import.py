@@ -18,6 +18,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
 from typer.testing import CliRunner
 
 import powercontext.client.cli as client_cli
@@ -434,6 +435,57 @@ def test_codex_reader_skips_host_generated_user_messages(tmp_path: Path) -> None
     read_result = read_codex_prompts(codex_home=codex_home)
 
     assert [prompt.content for prompt in read_result.prompts] == ["real prompt"]
+
+
+@pytest.mark.parametrize(
+    ("content", "metadata"),
+    [
+        ('<external_codex_apps_open_page>{"page_id":null}</external_codex_apps_open_page>', {}),
+        (
+            '<external_codex_apps_open_page>{"page_id":"page-a"}</external_codex_apps_open_page>',
+            {"content_item_kinds": ["additional_content.codex_apps_open_page"]},
+        ),
+        ("Page context", {"content_item_kinds": ["additional_content.codex_apps_open_page"]}),
+    ],
+)
+def test_import_sessions_excludes_host_generated_page_context(
+    tmp_path: Path, content: str, metadata: dict[str, object]
+) -> None:
+    codex_home = tmp_path / "codex"
+    session_dir = codex_home / "sessions"
+    session_dir.mkdir(parents=True)
+    _write_jsonl(
+        session_dir / "rollout.jsonl",
+        [
+            {"type": "session_meta", "payload": {"id": "session-a", "cwd": str(tmp_path)}},
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": content}],
+                    "internal_chat_message_metadata_passthrough": metadata,
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "real prompt"}],
+                    "internal_chat_message_metadata_passthrough": {"content_item_kinds": ["text"], "turn_id": "turn-a"},
+                },
+            },
+        ],
+    )
+    client = _ImportClient()
+
+    result = _run(import_sessions(client, host="codex", destination_id=_DESTINATION_ID, codex_home=codex_home))
+
+    assert result.discovered == result.imported == 1
+    assert result.failed == result.failed_files == 0
+    assert [source["content"] for source in client.stored_sources.values()] == ["real prompt"]
+    assert client.capture_requests[0].metadata["turn_id"] == "turn-a"
 
 
 def test_import_sessions_overlaps_with_live_capture_without_conflict(tmp_path: Path) -> None:

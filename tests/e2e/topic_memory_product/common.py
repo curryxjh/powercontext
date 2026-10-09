@@ -532,7 +532,6 @@ async def exercise_http_mcp_prepared_chain(  # noqa: C901
                     SearchTopicMemoryRequest(scope_id=scope_id, query=query, limit=8)
                 )
             except TransportError:
-                observed_empty_after_flush = True
                 await asyncio.sleep(0.2)
                 continue
             if search.hits:

@@ -428,7 +428,7 @@ def _prompt_from_codex_record(
     if record.get("type") != "response_item" or payload.get("type") != "message" or payload.get("role") != "user":
         return None
     content = _message_text(payload.get("content"))
-    if content is None or _is_synthetic_codex_user_message(content) or cwd is None:
+    if content is None or _is_synthetic_codex_user_message(content, payload) or cwd is None:
         return None
     return ImportedPrompt(
         host="codex",
@@ -640,18 +640,32 @@ def _payload_identifier(payload: Mapping[str, object], *keys: str) -> str | None
     return None
 
 
-def _is_synthetic_codex_user_message(content: str) -> bool:
+def _is_synthetic_codex_user_message(content: str, payload: Mapping[str, object]) -> bool:
+    metadata = payload.get("internal_chat_message_metadata_passthrough")
+    if isinstance(metadata, Mapping):
+        kinds = metadata.get("content_item_kinds")
+        if (
+            isinstance(kinds, list)
+            and kinds
+            and all(kind == "additional_content.codex_apps_open_page" for kind in kinds)
+        ):
+            return True
     stripped = content.strip()
     return (
         stripped.startswith("<environment_context>") and stripped.endswith("</environment_context>")
-    ) or stripped.startswith(("# AGENTS.md instructions", "<turn_aborted", "<codex_internal_context"))
+    ) or stripped.startswith((
+        "# AGENTS.md instructions",
+        "<turn_aborted",
+        "<codex_internal_context",
+        "<external_codex_apps_open_page>",
+    ))
 
 
 def _environment_cwd_from_record(record: Mapping[str, object], payload: Mapping[str, object]) -> str | None:
     if record.get("type") != "response_item" or payload.get("type") != "message" or payload.get("role") != "user":
         return None
     content = _message_text(payload.get("content"))
-    if content is None or not _is_synthetic_codex_user_message(content):
+    if content is None or not _is_synthetic_codex_user_message(content, payload):
         return None
     return _cwd_from_environment_context(content)
 
