@@ -166,25 +166,30 @@ from prometheus_client.parser import text_string_to_metric_families
 
 request = Request("http://127.0.0.1:8000/metrics", headers={"Accept": "text/plain"})
 with urlopen(request, timeout=10) as response:
-    metrics = response.read().decode("utf-8")
-found = False
-total = 0
-for family in text_string_to_metric_families(metrics):
-    if family.name != "powercontext_server_transport_requests":
-        continue
-    if family.type != "counter":
-        raise ValueError("Transport request metric is not a counter")
-    found = True
-    for sample in family.samples:
-        if sample.name != "powercontext_server_transport_requests_total" or sample.labels.get("transport") != "mcp":
+    payload = response.read()
+try:
+    metrics = payload.decode("utf-8")
+    found = False
+    total = 0
+    for family in text_string_to_metric_families(metrics):
+        if family.name != "powercontext_server_transport_requests":
             continue
-        value = sample.value
-        if not math.isfinite(value) or value < 0 or not value.is_integer():
-            raise ValueError("MCP request counter is invalid")
-        total += int(value)
-if not found:
-    raise ValueError("Transport request counter is missing")
-print(json.dumps({"mcp_requests": total}))
+        if family.type != "counter":
+            raise ValueError("Transport request metric is not a counter")
+        found = True
+        for sample in family.samples:
+            if sample.name != "powercontext_server_transport_requests_total" or sample.labels.get("transport") != "mcp":
+                continue
+            value = sample.value
+            if not math.isfinite(value) or value < 0 or not value.is_integer():
+                raise ValueError("MCP request counter is invalid")
+            total += int(value)
+    if not found:
+        raise ValueError("Transport request counter is missing")
+except ValueError:
+    print(json.dumps({"error": "malformed_metrics"}))
+else:
+    print(json.dumps({"mcp_requests": total}))
 """.strip()
 # The Server generates Scope IDs and rejects an explicit Scope that does not exist,
 # so each arm registers its own Scope and hands the returned ID to Codex.
@@ -2820,14 +2825,11 @@ class DockerSut:
                 raise TypeError
         except (json.JSONDecodeError, KeyError, TypeError) as error:
             raise InvalidTreatment("PowerContext database evidence is malformed") from error
-        try:
-            metrics = self._docker.run(
-                ("docker", "exec", container, "/runtime/pc-env/bin/python", "-c", _MCP_EVIDENCE_SCRIPT),
-                cwd=paths.runtime,
-                timeout=30,
-            )
-        except (CommandFailed, CommandTimedOut) as error:
-            raise InvalidTreatment("PowerContext MCP metrics could not be read") from error
+        metrics = self._docker.run(
+            ("docker", "exec", container, "/runtime/pc-env/bin/python", "-c", _MCP_EVIDENCE_SCRIPT),
+            cwd=paths.runtime,
+            timeout=30,
+        )
         try:
             mcp_requests = json.loads(metrics.stdout)["mcp_requests"]
             if isinstance(mcp_requests, bool) or not isinstance(mcp_requests, int) or mcp_requests < 0:
@@ -2931,7 +2933,15 @@ def _container_env_file_args(
     """
 
     reserved = {"NO_PROXY", "no_proxy", "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"}
-    safe_env = {k: v for k, v in config.container_env.items() if k not in reserved} if arm is Arm.ON else {}
+    safe_env = (
+        {
+            k: v
+            for k, v in config.container_env.items()
+            if k not in reserved and not k.upper().startswith("POWERCONTEXT_SERVER_METRICS")
+        }
+        if arm is Arm.ON
+        else {}
+    )
     if config.database_configs is not None:
         safe_env = {k: v for k, v in safe_env.items() if not k.upper().startswith("POWERCONTEXT_SERVER_DATABASE")}
         safe_env["POWERCONTEXT_SERVER_DATABASE"] = json.dumps(dict(config.database_configs[arm]), allow_nan=False)

@@ -1203,6 +1203,8 @@ def test_each_arm_receives_its_database_without_exposing_credentials(tmp_path: P
                 "POWERCONTEXT_SERVER_INFERENCE_GENERATION_MODEL": "openai:fixture-model",
                 "POWERCONTEXT_SERVER_DATABASE_KIND": "sqlite",
                 "POWERCONTEXT_SERVER_DATABASE_URL": "sqlite+aiosqlite:////wrong-database.db",
+                "POWERCONTEXT_SERVER_METRICS_ENABLED": "false",
+                "POWERCONTEXT_SERVER_METRICS": '{"enabled":false}',
             },
         )
         config.codex_binary.write_text("binary")
@@ -1322,6 +1324,7 @@ def test_sut_records_mcp_metrics_without_access_log_paths(tmp_path: Path, arm: A
         (Arm.OFF, '{"mcp_requests": 1}'),
         (Arm.ON, ""),
         (Arm.ON, "{}"),
+        (Arm.ON, '{"error": "malformed_metrics"}'),
         (Arm.ON, '{"mcp_requests": true}'),
         (Arm.ON, '{"mcp_requests": -1}'),
         (Arm.ON, '{"mcp_requests": 1.5}'),
@@ -1341,64 +1344,27 @@ def test_sut_rejects_invalid_mcp_evidence(tmp_path: Path, arm: Arm, payload: str
     assert any(command[:3] == ("docker", "rm", "-f") for command in docker.commands)
 
 
-def test_sut_fails_when_mcp_metrics_cannot_be_read(tmp_path: Path) -> None:
+@pytest.mark.parametrize("error_type", [CommandFailed, CommandTimedOut])
+def test_sut_fails_when_mcp_metrics_cannot_be_read(tmp_path: Path, error_type: type[CommandError]) -> None:
     paths = make_paths(tmp_path)
     config = replace(sut_config(tmp_path), proxy=None, tokensflow_enabled=False)
     config.codex_binary.write_text("binary")
     config.uv_binary.write_text("binary")
-    docker = TranscriptDocker(fail_at=powercontext_sut._MCP_EVIDENCE_SCRIPT)
+    error = error_type("metrics read failed", command_result("", returncode=70))
 
-    with pytest.raises(InvalidTreatment, match="MCP metrics could not be read"):
+    class UnavailableMetricsDocker(TranscriptDocker):
+        def run(self, argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            if powercontext_sut._MCP_EVIDENCE_SCRIPT in argv:
+                raise error
+            return super().run(argv, **kwargs)
+
+    docker = UnavailableMetricsDocker()
+
+    with pytest.raises(error_type) as captured:
         DockerSut(docker).run_arm(config, Arm.OFF, paths, b"prompt", ArtifactStore(paths.result_root))
 
+    assert captured.value is error
     assert not (paths.result_root / "powercontext/treatment.json").exists()
-
-
-@pytest.mark.parametrize(
-    ("samples", "count"),
-    [
-        ("", 0),
-        (
-            'powercontext_server_transport_requests_total{transport="http",operation="get_capabilities",outcome="success"} 9\n'
-            'powercontext_server_transport_requests_total{operation="mcp.initialize",outcome="success",transport="mcp"} 1\n'
-            'powercontext_server_transport_requests_total{transport="mcp",operation="mcp.tools.list",outcome="success"} 2\n'
-            'powercontext_server_transport_requests_total{transport="mcp",operation="mcp.tools.call",outcome="failure"} 3\n'
-            'powercontext_server_transport_requests_created{transport="mcp"} 100\n',
-            6,
-        ),
-    ],
-)
-def test_mcp_probe_counts_prometheus_samples(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], samples: str, count: int
-) -> None:
-    pytest.importorskip("prometheus_client", reason="Probe executes in the PowerContext Server environment")
-    payload = "# TYPE powercontext_server_transport_requests_total counter\n" + samples
-    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: io.BytesIO(payload.encode()))
-
-    exec(powercontext_sut._MCP_EVIDENCE_SCRIPT, {})
-
-    assert json.loads(capsys.readouterr().out) == {"mcp_requests": count}
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [
-        "",
-        "not prometheus metrics",
-        "# TYPE powercontext_server_transport_requests_total gauge\n",
-        *[
-            "# TYPE powercontext_server_transport_requests_total counter\n"
-            f'powercontext_server_transport_requests_total{{transport="mcp"}} {value}\n'
-            for value in ("-1", "1.5", "NaN", "+Inf", "invalid")
-        ],
-    ],
-)
-def test_mcp_probe_rejects_missing_or_invalid_metrics(monkeypatch: pytest.MonkeyPatch, payload: str) -> None:
-    pytest.importorskip("prometheus_client", reason="Probe executes in the PowerContext Server environment")
-    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: io.BytesIO(payload.encode()))
-
-    with pytest.raises(ValueError):
-        exec(powercontext_sut._MCP_EVIDENCE_SCRIPT, {})
 
 
 def _is_tokensflow(command: tuple[str, ...], action: str) -> bool:

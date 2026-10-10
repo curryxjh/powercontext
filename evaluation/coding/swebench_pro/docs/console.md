@@ -8,9 +8,11 @@ paired OFF/ON or single-arm runs.
 
 Each arm records completed logical MCP requests from the Server's Prometheus metrics, including initialization,
 tool discovery, tool calls, and failed requests. An ON arm requires both captured prompt Sources and a positive MCP
-request count; an OFF arm requires both counts to be zero. If MCP metrics cannot be read or validated, the arm fails
-instead of recording zero. The count proves MCP contact, not necessarily a tool call. A restart resets the Server's
-counter; historical reports with incorrect zero counts must be rerun to obtain valid evidence.
+request count; an OFF arm requires both counts to be zero. Metrics read failures remain retryable; malformed metrics
+are a terminal treatment validation failure. Neither records zero as a substitute for missing evidence. User-supplied
+`POWERCONTEXT_SERVER_METRICS*` settings are reserved so evaluation containers retain metrics collection. The count
+proves MCP contact, not necessarily a tool call. A restart resets the Server's counter; historical reports with
+incorrect zero counts must be rerun to obtain valid evidence.
 
 The service is intentionally deployment-neutral. Host names, operators, filesystem roots, optional proxy endpoints, Docker
 network ranges, credentials, and service locations are supplied by the operator. The repository does not contain a
