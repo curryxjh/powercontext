@@ -16,7 +16,7 @@ PowerContext keeps context with the work across conversations. When you return, 
 
 [Website](https://powercontext.oceanbase.io/) · [Installation walkthrough](https://powercontext.oceanbase.io/en/docs/get-started/quickstart/)
 
-PowerContext 1.1.0 includes the guided setup. The commands below install the stable release and connect
+PowerContext 1.2.0 includes the guided setup. The commands below install this version and connect
 the matching Agent integration.
 
 ## Pick up where the work left off
@@ -30,10 +30,10 @@ You decide what will matter later and what needs to move with the task. PowerCon
 You need Git, [uv](https://docs.astral.sh/uv/getting-started/installation/), and your Agent's CLI.
 Python 3.11+ is required; uv can provision it. macOS and Linux are supported; Windows support is `experimental`.
 
-Install 1.1.0 and open the interactive configuration wizard in a dedicated directory:
+Install 1.2.0 and open the interactive configuration wizard in a dedicated directory:
 
 ```bash
-uv tool install --force "powercontext[cli,server]==1.1.0"
+uv tool install --force "powercontext[cli,server]==1.2.0"
 mkdir -p powercontext-config
 cd powercontext-config
 powercontext config init --language en --output .env
@@ -71,7 +71,7 @@ covers Codex and Claude Code, Dashboard login, SSH forwarding, HTTPS prerequisit
 For example, the matching Codex installation is:
 
 ```bash
-powercontext setup codex --ref powercontext-v1.1.0
+powercontext setup codex --ref powercontext-v1.2.0
 powercontext doctor codex
 ```
 
@@ -91,6 +91,7 @@ These tags describe PowerContext integration maintenance and use. See the
 <td align="center" width="120"><a href="docs/en/docs/integrations/codex.md"><img src="assets/codex.png" alt="Codex" width="48" height="48" /><br /><sub><b>Codex</b></sub></a></td>
 <td align="center" width="120"><a href="docs/en/docs/integrations/claude-code.md"><img src="assets/claude-code.png" alt="Claude Code" width="48" height="48" /><br /><sub><b>Claude Code</b></sub></a></td>
 <td align="center" width="120"><a href="docs/en/docs/integrations/dsh.md"><img src="assets/deepseek.png" alt="DeepSeek Harness" width="48" height="48" /><br /><sub><b>DeepSeek Harness</b></sub></a></td>
+<td align="center" width="120"><a href="docs/en/docs/integrations/zcode.md"><img src="assets/zcode.png" alt="ZCode" width="48" height="48" /><br /><sub><b>ZCode</b></sub></a></td>
 <td align="center" width="120"><a href="integrations/hermes/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/hermes-dark.png"><img src="assets/hermes.png" alt="Hermes Agent" width="48" height="48" /></picture><br /><sub><b>Hermes Agent</b></sub></a></td>
 <td align="center" width="120"><a href="docs/en/docs/integrations/pi.md"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/pi-dark.png"><img src="assets/pi.png" alt="Pi Coding Agent" width="48" height="48" /></picture><br /><sub><b>Pi Coding Agent</b></sub></a></td>
 <td align="center" width="120"><a href="docs/en/docs/integrations/openclaw.md"><img src="assets/openclaw.png" alt="OpenClaw" width="48" height="48" /><br /><sub><b>OpenClaw</b></sub></a></td>
@@ -115,6 +116,14 @@ Explore the [22 Chinese Jupyter tutorials and a complete team workflow](examples
 
 See the [methods, full results, and limitations](https://powercontext.oceanbase.io/en/benchmarks/) behind these comparisons.
 
+### LoCoMo Plus: comparison with Jev
+
+![LoCoMo Plus scores for native PowerContext and PowerContext + Jev across GPT-4o-mini, Qwen3.7-plus, and GPT-4o](docs/assets/readme-locomo-plus.svg)
+
+*LoCoMo Plus scores with and without Jev candidate filtering after retrieval. Each model is used for both Memory extraction and answering; embeddings use qwen3.7-text-embedding (1024 dimensions). Jev score differences are +8.925, +8.577, and +4.198 percentage points, respectively.*
+
+These six scores were supplied by the project owner; the run artifacts are not publicly available for verification. The reproducibility instructions describe the evaluation harness, not verification of these scores.
+
 ## Build PowerContext
 
 ```bash
@@ -124,6 +133,8 @@ make test
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the complete development workflow.
+Coding and memory evaluations, performance benchmarks, and Skill regressions live under
+[`evaluation/`](evaluation/README.md).
 
 ## Learn more
 
