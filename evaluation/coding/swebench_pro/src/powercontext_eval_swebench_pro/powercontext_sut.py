@@ -158,6 +158,34 @@ if code == 0 and (not isinstance(payload, dict) or payload.get("status") != "rea
     code = 11
 sys.exit(code)
 """.strip()
+_MCP_EVIDENCE_SCRIPT = """
+import json
+import math
+from urllib.request import Request, urlopen
+from prometheus_client.parser import text_string_to_metric_families
+
+request = Request("http://127.0.0.1:8000/metrics", headers={"Accept": "text/plain"})
+with urlopen(request, timeout=10) as response:
+    metrics = response.read().decode("utf-8")
+found = False
+total = 0
+for family in text_string_to_metric_families(metrics):
+    if family.name != "powercontext_server_transport_requests":
+        continue
+    if family.type != "counter":
+        raise ValueError("Transport request metric is not a counter")
+    found = True
+    for sample in family.samples:
+        if sample.name != "powercontext_server_transport_requests_total" or sample.labels.get("transport") != "mcp":
+            continue
+        value = sample.value
+        if not math.isfinite(value) or value < 0 or not value.is_integer():
+            raise ValueError("MCP request counter is invalid")
+        total += int(value)
+if not found:
+    raise ValueError("Transport request counter is missing")
+print(json.dumps({"mcp_requests": total}))
+""".strip()
 # The Server generates Scope IDs and rejects an explicit Scope that does not exist,
 # so each arm registers its own Scope and hands the returned ID to Codex.
 _SCOPE_CREATION_SCRIPT = """
@@ -557,7 +585,9 @@ def validate_treatment(
         and evidence.scope_key == arm_scope_key(run_id, arm)
     )
     activity = (
-        evidence.prompt_sources >= 1 if arm is Arm.ON else evidence.prompt_sources == 0 and evidence.mcp_requests == 0
+        evidence.prompt_sources > 0 and evidence.mcp_requests > 0
+        if arm is Arm.ON
+        else evidence.prompt_sources == 0 and evidence.mcp_requests == 0
     )
     if not common or not activity:
         raise InvalidTreatment("Treatment evidence does not match the requested arm")
@@ -2790,13 +2820,20 @@ class DockerSut:
                 raise TypeError
         except (json.JSONDecodeError, KeyError, TypeError) as error:
             raise InvalidTreatment("PowerContext database evidence is malformed") from error
-        logs = self._docker.run(
-            ("docker", "logs", container),
-            cwd=paths.runtime,
-            timeout=30,
-            check=False,
-        )
-        mcp_requests = sum("/mcp" in line for line in (logs.stdout + logs.stderr).splitlines())
+        try:
+            metrics = self._docker.run(
+                ("docker", "exec", container, "/runtime/pc-env/bin/python", "-c", _MCP_EVIDENCE_SCRIPT),
+                cwd=paths.runtime,
+                timeout=30,
+            )
+        except (CommandFailed, CommandTimedOut) as error:
+            raise InvalidTreatment("PowerContext MCP metrics could not be read") from error
+        try:
+            mcp_requests = json.loads(metrics.stdout)["mcp_requests"]
+            if isinstance(mcp_requests, bool) or not isinstance(mcp_requests, int) or mcp_requests < 0:
+                raise TypeError
+        except (json.JSONDecodeError, KeyError, TypeError) as error:
+            raise InvalidTreatment("PowerContext MCP metrics evidence is malformed") from error
         return TreatmentEvidence(
             plugin_installed=True,
             plugin_id=plugin[0],

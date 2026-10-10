@@ -365,6 +365,7 @@ def test_treatment_evidence_preserves_database_identity_and_reads_legacy_records
         (Arm.ON, {"plugin_checkout_sha": "b" * 40}),
         (Arm.ON, {"server_ready": False}),
         (Arm.ON, {"prompt_sources": 0}),
+        (Arm.ON, {"mcp_requests": 0}),
         (Arm.ON, {"scope_id": "scp_other"}),
         (Arm.ON, {"scope_key": "eval:other:on"}),
         # Evidence for a Scope the arm did not register, such as the bare key, is rejected.
@@ -425,6 +426,7 @@ class TranscriptDocker:
         container_tokensflow_version: bytes | None = None,
         database_kind: str = "sqlite",
         database_fingerprint: str = "d" * 64,
+        mcp_evidence: str | None = None,
     ) -> None:
         self.commands: list[tuple[str, ...]] = []
         self.fail_at = fail_at
@@ -438,6 +440,7 @@ class TranscriptDocker:
         self.container_networks: dict[str, set[str]] = {}
         self.database_kind = database_kind
         self.database_fingerprint = database_fingerprint
+        self.mcp_evidence = mcp_evidence
 
     @staticmethod
     def _output(payload: bytes, kwargs: dict[str, object], *, returncode: int = 0) -> CommandResult:
@@ -463,6 +466,12 @@ class TranscriptDocker:
             version = self.container_tokensflow_version if argv[0] == "docker" else self.host_tokensflow_version
             return self._output(version, kwargs)
         script = " ".join(argv)
+        if "http://127.0.0.1:8000/metrics" in script:
+            return command_result(
+                self.mcp_evidence
+                if self.mcp_evidence is not None
+                else json.dumps({"mcp_requests": 0 if argv[2].endswith("-off") else 2})
+            )
         if "tokensflow-stop-initial-probe" in script:
             return command_result("123\n")
         if "tokensflow-stop-term" in script:
@@ -1289,6 +1298,107 @@ def test_sut_rejects_mismatched_or_incomplete_database_evidence(
 
     assert not (paths.result_root / "powercontext/treatment.json").exists()
     assert any(command[:3] == ("docker", "rm", "-f") for command in docker.commands)
+
+
+@pytest.mark.parametrize(("arm", "count"), [(Arm.ON, 2), (Arm.OFF, 0)])
+def test_sut_records_mcp_metrics_without_access_log_paths(tmp_path: Path, arm: Arm, count: int) -> None:
+    paths = make_paths(tmp_path)
+    config = replace(sut_config(tmp_path), proxy=None, tokensflow_enabled=False)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+    docker = TranscriptDocker(mcp_evidence=json.dumps({"mcp_requests": count}))
+
+    outcome = DockerSut(docker).run_arm(config, arm, paths, b"prompt", ArtifactStore(paths.result_root))
+
+    assert outcome.evidence.mcp_requests == count
+    persisted = TreatmentEvidence.from_json((paths.result_root / "powercontext/treatment.json").read_text())
+    assert persisted.mcp_requests == count
+
+
+@pytest.mark.parametrize(
+    ("arm", "payload"),
+    [
+        (Arm.ON, '{"mcp_requests": 0}'),
+        (Arm.OFF, '{"mcp_requests": 1}'),
+        (Arm.ON, ""),
+        (Arm.ON, "{}"),
+        (Arm.ON, '{"mcp_requests": true}'),
+        (Arm.ON, '{"mcp_requests": -1}'),
+        (Arm.ON, '{"mcp_requests": 1.5}'),
+    ],
+)
+def test_sut_rejects_invalid_mcp_evidence(tmp_path: Path, arm: Arm, payload: str) -> None:
+    paths = make_paths(tmp_path)
+    config = replace(sut_config(tmp_path), proxy=None, tokensflow_enabled=False)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+    docker = TranscriptDocker(mcp_evidence=payload)
+
+    with pytest.raises(InvalidTreatment):
+        DockerSut(docker).run_arm(config, arm, paths, b"prompt", ArtifactStore(paths.result_root))
+
+    assert not (paths.result_root / "powercontext/treatment.json").exists()
+    assert any(command[:3] == ("docker", "rm", "-f") for command in docker.commands)
+
+
+def test_sut_fails_when_mcp_metrics_cannot_be_read(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    config = replace(sut_config(tmp_path), proxy=None, tokensflow_enabled=False)
+    config.codex_binary.write_text("binary")
+    config.uv_binary.write_text("binary")
+    docker = TranscriptDocker(fail_at=powercontext_sut._MCP_EVIDENCE_SCRIPT)
+
+    with pytest.raises(InvalidTreatment, match="MCP metrics could not be read"):
+        DockerSut(docker).run_arm(config, Arm.OFF, paths, b"prompt", ArtifactStore(paths.result_root))
+
+    assert not (paths.result_root / "powercontext/treatment.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("samples", "count"),
+    [
+        ("", 0),
+        (
+            'powercontext_server_transport_requests_total{transport="http",operation="get_capabilities",outcome="success"} 9\n'
+            'powercontext_server_transport_requests_total{operation="mcp.initialize",outcome="success",transport="mcp"} 1\n'
+            'powercontext_server_transport_requests_total{transport="mcp",operation="mcp.tools.list",outcome="success"} 2\n'
+            'powercontext_server_transport_requests_total{transport="mcp",operation="mcp.tools.call",outcome="failure"} 3\n'
+            'powercontext_server_transport_requests_created{transport="mcp"} 100\n',
+            6,
+        ),
+    ],
+)
+def test_mcp_probe_counts_prometheus_samples(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], samples: str, count: int
+) -> None:
+    pytest.importorskip("prometheus_client", reason="Probe executes in the PowerContext Server environment")
+    payload = "# TYPE powercontext_server_transport_requests_total counter\n" + samples
+    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: io.BytesIO(payload.encode()))
+
+    exec(powercontext_sut._MCP_EVIDENCE_SCRIPT, {})
+
+    assert json.loads(capsys.readouterr().out) == {"mcp_requests": count}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "",
+        "not prometheus metrics",
+        "# TYPE powercontext_server_transport_requests_total gauge\n",
+        *[
+            "# TYPE powercontext_server_transport_requests_total counter\n"
+            f'powercontext_server_transport_requests_total{{transport="mcp"}} {value}\n'
+            for value in ("-1", "1.5", "NaN", "+Inf", "invalid")
+        ],
+    ],
+)
+def test_mcp_probe_rejects_missing_or_invalid_metrics(monkeypatch: pytest.MonkeyPatch, payload: str) -> None:
+    pytest.importorskip("prometheus_client", reason="Probe executes in the PowerContext Server environment")
+    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: io.BytesIO(payload.encode()))
+
+    with pytest.raises(ValueError):
+        exec(powercontext_sut._MCP_EVIDENCE_SCRIPT, {})
 
 
 def _is_tokensflow(command: tuple[str, ...], action: str) -> bool:
