@@ -1,0 +1,41 @@
+{
+  "task": "orderstatus2026",
+  "query": "status",
+  "documents": [
+    {
+      "path": "minimax/specs/order-list.md",
+      "category": "spec",
+      "content": "# Order listing\n\nTask: add an exact `status` filter to `list_orders`.\n\n- With `status=None`, return all orders in input order, as before.\n- With a status, return only orders whose `Order.status` equals that value, preserving input order.\n- A status with no matches returns an empty list.\n- Do not mutate the input or any order.\n- The empty string is a valid filter value; only `None` disables filtering.\n\nRelevant source: `minimax/sample_app/orders.py`, symbol `list_orders`.\nFunctional and compatibility checks: `minimax/tests/test_orders.py`.\n",
+      "sha256": "854e91483ce1923bd4e511eedc1738ddb657850cc4d6a83159407ade6584160c",
+      "score": 0.2548656163113995
+    },
+    {
+      "path": "minimax/tests/test_orders.py",
+      "category": "test",
+      "content": "from minimax.sample_app.orders import Order, list_orders\n\n\nORDERS = [\n    Order(\"A\", \"paid\"),\n    Order(\"B\", \"pending\"),\n    Order(\"C\", \"paid\"),\n    Order(\"D\", \"\"),\n]\n\n\ndef test_status_filter_matches_exact_value_in_input_order():\n    assert list_orders(ORDERS, status=\"paid\") == [ORDERS[0], ORDERS[2]]\n    assert list_orders(ORDERS, status=\"missing\") == []\n    assert list_orders(ORDERS, status=\"\") == [ORDERS[3]]\n\n\ndef test_existing_unfiltered_behavior_and_immutable_input():\n    before = list(ORDERS)\n    assert list_orders(ORDERS) == before\n    assert ORDERS == before\n",
+      "sha256": "49bf5ad58c20b9a7ffdd5c12242951a4b044bbea9acfaaedac1a381313efe0dc",
+      "score": 0.22448979591836737
+    },
+    {
+      "path": "minimax/sample_app/orders.py",
+      "category": "code",
+      "content": "\"\"\"Order listing for a small shop.\"\"\"\n\nfrom dataclasses import dataclass\n\n\n@dataclass(frozen=True)\nclass Order:\n    number: str\n    status: str\n\n\ndef list_orders(orders: list[Order], status: str | None = None) -> list[Order]:\n    \"\"\"Return orders in their original order.\"\"\"\n    return list(orders)\n",
+      "sha256": "52f1a9fe6fa09ce295a9adce2d2149db58442a36ced833d3ca9a084bdd0afac9",
+      "score": 0.20183486238532114
+    }
+  ],
+  "progress": {
+    "scope_id": "scp_5yc3w4aaha1cra6h9f5m1wfq8h",
+    "memory_ref": {
+      "family": "memory",
+      "artifact_id": "memory",
+      "revision": 1
+    },
+    "entry_id": "mem_ent_1307f51f764c4a6995a68c936eeaed7b",
+    "record": {
+      "completed": "Imported spec, code, tests into seekdb; baseline regression passed",
+      "pending": "Implement exact status filter with MiniMax; run target and regression tests",
+      "validation": "Before change: target test failed on paid filter; compatibility test passed; pytest exit 1"
+    }
+  }
+}

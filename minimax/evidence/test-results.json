@@ -1,0 +1,18 @@
+{
+  "before": {
+    "command": "python -m pytest -q -p no:cacheprovider minimax/tests/test_orders.py",
+    "code_sha256": "52f1a9fe6fa09ce295a9adce2d2149db58442a36ced833d3ca9a084bdd0afac9",
+    "test_sha256": "49bf5ad58c20b9a7ffdd5c12242951a4b044bbea9acfaaedac1a381313efe0dc",
+    "exit_code": 1,
+    "stdout": "F.                                                                       [100%]\n=================================== FAILURES ===================================\n____________ test_status_filter_matches_exact_value_in_input_order _____________\n\n    def test_status_filter_matches_exact_value_in_input_order():\n>       assert list_orders(ORDERS, status=\"paid\") == [ORDERS[0], ORDERS[2]]\nE       AssertionError: assert [Order(number...', status='')] == [Order(number...tatus='paid')]\nE         \nE         At index 1 diff: Order(number='B', status='pending') != Order(number='C', status='paid')\nE         Left contains 2 more items, first extra item: Order(number='C', status='paid')\nE         Use -v to get more diff\n\nminimax/tests/test_orders.py:13: AssertionError\n=========================== short test summary info ============================\nFAILED minimax/tests/test_orders.py::test_status_filter_matches_exact_value_in_input_order\n1 failed, 1 passed in 0.01s\n",
+    "stderr": ""
+  },
+  "after": {
+    "command": "python -m pytest -q -p no:cacheprovider minimax/tests/test_orders.py",
+    "code_sha256": "e8d2fb3f492c88b73e07ce7e9656527cf99774603f459acdef122539eabc2576",
+    "test_sha256": "49bf5ad58c20b9a7ffdd5c12242951a4b044bbea9acfaaedac1a381313efe0dc",
+    "exit_code": 0,
+    "stdout": "..                                                                       [100%]\n2 passed in 0.00s\n",
+    "stderr": ""
+  }
+}

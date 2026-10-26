@@ -1,0 +1,7 @@
+{
+  "documents": [
+    {"path": "minimax/specs/order-list.md", "category": "spec"},
+    {"path": "minimax/sample_app/orders.py", "category": "code"},
+    {"path": "minimax/tests/test_orders.py", "category": "test"}
+  ]
+}

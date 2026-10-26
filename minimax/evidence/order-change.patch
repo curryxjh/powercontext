@@ -1,0 +1,9 @@
+--- a/minimax/sample_app/orders.py
++++ b/minimax/sample_app/orders.py
+@@ -13,2 +13,4 @@
+-    """Return orders in their original order."""
+-    return list(orders)
++    """Return orders in their original order, filtered by exact status when given."""
++    if status is None:
++        return list(orders)
++    return [order for order in orders if order.status == status]
