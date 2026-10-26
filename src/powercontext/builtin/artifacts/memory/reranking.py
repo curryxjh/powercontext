@@ -177,8 +177,8 @@ def _normalize_ranks(
 def _validate_bounds(candidate_count: int, limit: int) -> None:
     if candidate_count < 1:
         raise ValueError("rerank requires at least one candidate")  # noqa: TRY003
-    if limit < 1 or limit > candidate_count:
-        raise ValueError("rerank limit must be between one and the candidate count")  # noqa: TRY003
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1 or limit > candidate_count:
+        raise ValueError("rerank limit must be an integer between one and the candidate count")  # noqa: TRY003
 
 
 __all__ = [
