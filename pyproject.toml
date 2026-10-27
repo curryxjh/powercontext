@@ -37,6 +37,9 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+pdf = [
+    "pypdf[crypto]==6.19.0",
+]
 code = [
     "tree-sitter==0.26.0",
     "tree-sitter-go==0.25.0",
@@ -128,6 +131,7 @@ notebooks = [
 ]
 dev = [
     "powercontext[code]",
+    "powercontext[pdf]",
     "datamodel-code-generator==0.64.0",
     "powercontext[cli,server]",
     "powercontext-langchain",
@@ -136,6 +140,7 @@ dev = [
     "langgraph>=1.2,<2",
     "langchain-core>=1,<2",
     "pytest>=9.0.2",
+    "pytest-asyncio>=1.4,<2",
     "time-machine==3.5.0",
     "pytest-cov>=7,<8",
     "pyyaml>=6,<7",

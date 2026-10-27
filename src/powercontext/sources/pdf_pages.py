@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections.abc import Awaitable, Callable
 from io import BytesIO
@@ -33,97 +34,94 @@ if TYPE_CHECKING:
 
 PDF_PAGE_SOURCE_NAME = "pdf-page"
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
-_QUERY_STOP_WORDS = frozenset(
-    {
-        "a",
-        "about",
-        "after",
-        "all",
-        "also",
-        "an",
-        "and",
-        "any",
-        "are",
-        "as",
-        "at",
-        "be",
-        "been",
-        "being",
-        "both",
-        "but",
-        "by",
-        "can",
-        "define",
-        "details",
-        "do",
-        "does",
-        "each",
-        "assuming",
-        "analyst",
-        "calculate",
-        "directly",
-        "ebitda",
-        "explicitly",
-        "for",
-        "from",
-        "give",
-        "has",
-        "have",
-        "how",
-        "if",
-        "in",
-        "important",
-        "into",
-        "investment",
-        "is",
-        "it",
-        "may",
-        "margin",
-        "more",
-        "not",
-        "of",
-        "on",
-        "only",
-        "or",
-        "our",
-        "pepsico",
-        "question",
-        "reported",
-        "respond",
-        "response",
-        "relying",
-        "shown",
-        "should",
-        "some",
-        "state",
-        "that",
-        "the",
-        "than",
-        "their",
-        "this",
-        "then",
-        "to",
-        "ongoing",
-        "outlined",
-        "perspective",
-        "primarily",
-        "use",
-        "using",
-        "was",
-        "were",
-        "what",
-        "which",
-        "with",
-        "within",
-        "who",
-        "would",
-        "unadjusted",
-        "battles",
-        "battle",
-        "materially",
-        "quantity",
-    }
-)
+_QUERY_STOP_WORDS = frozenset({
+    "a",
+    "about",
+    "after",
+    "all",
+    "also",
+    "an",
+    "and",
+    "any",
+    "are",
+    "as",
+    "at",
+    "be",
+    "been",
+    "being",
+    "both",
+    "but",
+    "by",
+    "can",
+    "define",
+    "details",
+    "do",
+    "does",
+    "each",
+    "assuming",
+    "analyst",
+    "calculate",
+    "directly",
+    "ebitda",
+    "explicitly",
+    "for",
+    "from",
+    "give",
+    "has",
+    "have",
+    "how",
+    "if",
+    "in",
+    "important",
+    "into",
+    "investment",
+    "is",
+    "it",
+    "may",
+    "margin",
+    "more",
+    "not",
+    "of",
+    "on",
+    "only",
+    "or",
+    "our",
+    "question",
+    "reported",
+    "respond",
+    "response",
+    "relying",
+    "shown",
+    "should",
+    "some",
+    "state",
+    "that",
+    "the",
+    "than",
+    "their",
+    "this",
+    "then",
+    "to",
+    "ongoing",
+    "outlined",
+    "perspective",
+    "primarily",
+    "use",
+    "using",
+    "was",
+    "were",
+    "what",
+    "which",
+    "with",
+    "within",
+    "who",
+    "would",
+    "unadjusted",
+    "battles",
+    "battle",
+    "materially",
+    "quantity",
+})
 
 
 class PDFDocumentInput(BaseModel):
@@ -137,8 +135,6 @@ class PDFDocumentInput(BaseModel):
     def validate_document_id(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("document_id must not be blank")  # noqa: TRY003
-        if value != value.strip():
-            raise ValueError("document_id must not contain leading or trailing whitespace")  # noqa: TRY003
         return value
 
 
@@ -147,7 +143,7 @@ class PDFPageInput(BaseModel):
 
     document_id: str
     document_sha256: str
-    page_number: int = Field(ge=1)
+    page_number: int = Field(ge=1, strict=True)
     text: str
 
     @field_validator("document_id")
@@ -155,8 +151,6 @@ class PDFPageInput(BaseModel):
     def validate_document_id(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("document_id must not be blank")  # noqa: TRY003
-        if value != value.strip():
-            raise ValueError("document_id must not contain leading or trailing whitespace")  # noqa: TRY003
         return value
 
     @field_validator("document_sha256")
@@ -172,7 +166,7 @@ class PDFPageSource(Source):
 
     document_id: str
     document_sha256: str
-    page_number: int = Field(ge=1)
+    page_number: int = Field(ge=1, strict=True)
     text: str
 
 
@@ -207,17 +201,19 @@ def _ensure_pdf_readable(reader: Any) -> None:
 def pdf_page_source_id(document_id: str, document_sha256: str, page_number: int) -> str:
     """Return a bounded identity derived from the document and physical page."""
 
-    if not document_id.strip() or document_id != document_id.strip():
-        raise ValueError("document_id must be non-empty and trimmed")  # noqa: TRY003
-    if _SHA256_PATTERN.fullmatch(document_sha256) is None or page_number < 1:
+    if not document_id.strip():
+        raise ValueError("document_id must not be blank")  # noqa: TRY003
+    if _SHA256_PATTERN.fullmatch(document_sha256) is None or type(page_number) is not int or page_number < 1:
         raise ValueError("invalid PDF page identity")  # noqa: TRY003
 
     encoded_document_id = quote(document_id, safe="")
     source_id = f"pdf:{encoded_document_id}:{document_sha256}:{page_number}"
     if len(source_id) <= 256:
         return source_id
-    document_key = hashlib.sha256(document_id.encode("utf-8")).hexdigest()
-    return f"pdf:{document_key}:{document_sha256}:{page_number}"
+    # Use a disjoint namespace: a literal document ID can itself be another
+    # document's digest. Hash the complete tuple to bound even large page IDs.
+    identity = json.dumps((document_id, document_sha256, page_number), ensure_ascii=False, separators=(",", ":"))
+    return f"pdf-sha256:{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"
 
 
 class PDFPageSourceAdapter:
@@ -282,8 +278,10 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
     the source page. Every returned citation still comes directly from Memory search.
     """
 
-    if limit < 0:
-        raise ValueError("limit must not be negative")  # noqa: TRY003
+    if type(limit) is not int or limit < 0:
+        raise ValueError("limit must be a nonnegative integer")  # noqa: TRY003
+    if not question.strip():
+        raise ValueError("question must not be blank")  # noqa: TRY003
     if limit == 0:
         return ()
     from powercontext.artifacts import MemoryCitation
@@ -315,7 +313,22 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
                 ranked[key] = (previous[0], previous[1] + contribution, previous[2])
 
     ordered = sorted(ranked.values(), key=lambda item: (-item[1], item[2]))
-    return tuple(item[0] for item in ordered[:limit])
+    from powercontext.builtin.runtime import GetMemoryEntryRequest
+
+    selected: list[MemoryCitation] = []
+    pages: set[str] = set()
+    for citation, _, _ in ordered:
+        record = await memory.get(GetMemoryEntryRequest(citation=citation))
+        references = {ref.source_id for ref in record.entry.sources if ref.source_type == PDF_PAGE_SOURCE_NAME}
+        # A page citation must identify exactly one physical page, rather than
+        # an unrelated note or a summary combining several pages.
+        if len(references) != 1 or references & pages:
+            continue
+        pages.update(references)
+        selected.append(citation)
+        if len(selected) == limit:
+            break
+    return tuple(selected)
 
 
 def _retrieval_queries(question: str) -> tuple[str, ...]:
@@ -354,6 +367,12 @@ def _section_queries(question: str) -> tuple[str, ...]:
         sections.extend(("consolidated statement of income", "consolidated balance sheet", "statement of cash flows"))
     if "geograph" in text:
         sections.extend(("reportable segments", "countries territories"))
+    if re.search(r"\b(?:ppne|ppe)\b|pp\s*&\s*e", text):
+        sections.append("property plant equipment")
+    if "ebitda" in text:
+        sections.extend(("operating income", "depreciation amortization"))
+    if "capex" in text:
+        sections.append("capital expenditures")
     return tuple(sections)
 
 
