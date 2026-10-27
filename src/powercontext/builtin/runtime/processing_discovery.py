@@ -23,7 +23,33 @@ from powercontext.builtin.persistence.cursors import SourceCursorRepository
 from powercontext.builtin.persistence.database import AsyncDatabase
 from powercontext.builtin.persistence.processing_intents import ArtifactProcessingIntentRepository
 from powercontext.builtin.persistence.supervision import ArtifactProcessingFence, ArtifactProcessingLeaseRepository
-from powercontext.builtin.persistence.tables import PROFILE_POLICIES_TABLE, SOURCE_JOURNAL_HEADS_TABLE
+from powercontext.builtin.persistence.tables import PROFILE_POLICIES_TABLE, SOURCE_JOURNAL_HEADS_TABLE, SOURCES_TABLE
+
+
+async def source_count_scopes(
+    connection: AsyncConnection, scope_ids: tuple[str, ...], *, binding_name: str, threshold: int
+) -> frozenset[str]:
+    """Qualify journal identities after each Family's committed cursor.
+
+    The indexed range stops at the threshold; it never reads Source payloads or
+    counts the complete history. Lineage-only Sources share this same journal.
+    """
+
+    cursors = await SourceCursorRepository().load_many(connection, scope_ids, binding_name)
+    eligible = set()
+    for scope in scope_ids:
+        cursor = cursors.get(scope)
+        after = 0 if cursor is None else cursor.cursor.sequence
+        position = await connection.scalar(
+            select(SOURCES_TABLE.c.journal_position)
+            .where(SOURCES_TABLE.c.scope_id == scope, SOURCES_TABLE.c.journal_position > after)
+            .order_by(SOURCES_TABLE.c.journal_position)
+            .offset(threshold - 1)
+            .limit(1)
+        )
+        if position is not None:
+            eligible.add(scope)
+    return frozenset(eligible)
 
 
 async def enabled_profile_scopes(connection: AsyncConnection, scope_ids: tuple[str, ...]) -> frozenset[str]:

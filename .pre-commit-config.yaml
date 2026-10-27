@@ -9,7 +9,8 @@ repos:
       - id: check-json
         exclude: ^.devcontainer/devcontainer.json
       - id: pretty-format-json
-        exclude: ^(?:\.devcontainer/devcontainer\.json|benchmark/locomo/dataset/locomo10\.json)$
+        # Preserve public evaluation fixtures; they are maintained by the competition package.
+        exclude: ^(?:competition/|\.devcontainer/devcontainer\.json$|benchmark/locomo/dataset/locomo10\.json$)
         args: [--autofix, --no-sort-keys, --no-ensure-ascii]
       - id: end-of-file-fixer
         exclude: ^benchmark/locomo/dataset/locomo10\.json$
@@ -19,8 +20,10 @@ repos:
     rev: "v0.15.7"
     hooks:
       - id: ruff-check
+        exclude: ^competition/
         args: [--exit-non-zero-on-fix]
       - id: ruff-format
+        exclude: ^competition/
 
   - repo: local
     hooks:

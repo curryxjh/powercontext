@@ -50,3 +50,35 @@ Source → flush → entry → vector search 验收命令见[启用 Memory 提�
 并确认旧 citation 没有变化。不要仅修改 profile ID 或 dimension 来绕过已有向量与模型不匹配的错误。
 
 timeout、batch size、storage 设置和准确默认值见[配置](../operate/configuration.md)。
+
+## 在 SDK 中共享 Embedding 请求
+
+SDK 应用可以包装已有的 `EmbeddingModel`，启用请求合并与有界向量缓存。在同一事件循环的多个调用之间共享
+一个包装器，并将其注入 Runtime：
+
+```python
+from powercontext.builtin.inference.coalescing import CoalescingEmbeddingModel
+from powercontext.builtin.runtime import open_builtin_contexts
+
+model = CoalescingEmbeddingModel(
+    base_model, max_batch_size=64, coalesce_ms=5.0, cache_size=1024
+)
+async with open_builtin_contexts(config, embedding_model=model) as contexts:
+    scope = await contexts.get("project")
+    # 通过 scope.artifacts.memory 正常写入和检索 Memory。
+```
+
+`max_batch_size` 限制单次底层请求中的不同文本数。`coalesce_ms` 是非负的合并窗口毫秒数；设为零时，
+同一轮事件循环中已经可以执行的调用仍可共享请求。`cache_size` 是成功文本向量的 LRU 缓存容量，
+设为零关闭已完成结果的缓存，但保留执行中请求的共享。批次上限和缓存容量必须是整数，前者为正数，后者非负。
+
+每个调用仍按原始输入顺序获得向量，并保留重复位置。其 `usage` 对实际等待过的每个不同底层批次只汇总一次，
+保留 provider 报告的请求数与 token 数。共享批次可以计入多个调用的 usage，因此不能将这些值视为底层账单的独占分摊。
+纯缓存命中的请求数为零；所有相关批次均未报告某种 token 用量时，该字段保持 `None`，否则汇总已知值。
+
+取消一个调用不会取消共享工作。底层失败或向量数量不匹配会使依赖该批次的调用失败，但不会污染缓存，
+也不会阻止独立批次完成。失败文本可以重试。区分查询与文档向量的 provider 使用不同的共享请求和缓存身份，
+对称模型则在两种操作之间共享向量。
+
+包装器暴露底层模型的 profile。缓存仅属于包装器实例，不持久化，也不跨 worker 进程共享；
+包装器生命周期内应保持模型与 profile 配置不变。未使用包装器的应用维持原有行为。

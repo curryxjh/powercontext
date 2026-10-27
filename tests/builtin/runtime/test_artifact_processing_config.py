@@ -35,6 +35,21 @@ from powercontext.server.settings import ServerSettings
 OCEANBASE_URL = "mysql+aoceanbase://root%40tenant:secret@127.0.0.1:2881/powercontext?charset=utf8mb4"
 
 
+@pytest.mark.parametrize("field", ["memory_source_count_threshold", "topic_memory_source_count_threshold"])
+def test_count_threshold_defaults_and_serialization(field):
+    assert getattr(RuntimeConfig(), field) is None
+    for value in (None, 1, 3, 100):
+        config = RuntimeConfig.model_validate({field: value})
+        assert getattr(RuntimeConfig.model_validate_json(config.model_dump_json()), field) == value
+
+
+@pytest.mark.parametrize("field", ["memory_source_count_threshold", "topic_memory_source_count_threshold"])
+@pytest.mark.parametrize("value", [True, False, 0, -1, 1.0, 3.5, "3", "", [], {}])
+def test_count_threshold_rejects_non_positive_or_non_integer_values(field, value):
+    with pytest.raises(ValidationError):
+        RuntimeConfig.model_validate({field: value})
+
+
 def test_artifact_processing_configuration_defaults_match_the_rfc() -> None:
     runtime = RuntimeConfig()
 

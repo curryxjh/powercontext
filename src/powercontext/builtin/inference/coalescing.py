@@ -12,28 +12,45 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Coalesce concurrent embedding requests and retain a bounded result cache."""
+"""Shared in-flight embedding work and a bounded, model-local vector cache."""
 
 from __future__ import annotations
 
 import asyncio
+import math
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any
 
 from powercontext.builtin.inference.models import EmbeddingResult, EmbeddingVector, InferenceUsage
-from powercontext.builtin.inference.protocols import EmbeddingModel
+from powercontext.builtin.inference.protocols import EmbeddingModel, QueryEmbeddingModel
 
 
-@dataclass(frozen=True)
-class _BatchResult:
-    vectors: tuple[EmbeddingVector, ...]
+@dataclass(frozen=True, slots=True)
+class _EmbeddedText:
+    vector: EmbeddingVector
     usage: InferenceUsage
-    batch_id: object
+    batch: object
+
+
+def _observe_failure(future: asyncio.Future[_EmbeddedText]) -> None:
+    # All callers may have been cancelled before a shared request fails.
+    # Observing the exception prevents an orphaned Future warning; active
+    # callers still receive the original exception when they await the Future.
+    if not future.cancelled():
+        future.exception()
 
 
 class CoalescingEmbeddingModel:
-    """Share same-text work across callers while preserving each caller's usage."""
+    """Merge embedding calls on one event loop and cache successful vectors.
+
+    Each caller receives vectors in its own input order and the provider usage
+    of each distinct batch it awaited, counted once. Cached vectors carry no
+    new usage. Cancelling a caller leaves shared provider work running.
+
+    Query-aware providers use separate query/document cache and in-flight keys;
+    symmetric providers share both paths. Cache contents belong to this wrapper
+    instance and are neither persisted nor shared across worker processes.
+    """
 
     def __init__(
         self,
@@ -45,141 +62,114 @@ class CoalescingEmbeddingModel:
     ) -> None:
         if type(max_batch_size) is not int or max_batch_size < 1:
             raise ValueError("max_batch_size must be a positive integer")  # noqa: TRY003
-        if isinstance(coalesce_ms, bool) or not isinstance(coalesce_ms, (int, float)) or coalesce_ms < 0:
-            raise ValueError("coalesce_ms must be non-negative")  # noqa: TRY003
         if type(cache_size) is not int or cache_size < 0:
-            raise ValueError("cache_size must be non-negative")  # noqa: TRY003
-        self._model = model
+            raise ValueError("cache_size must be a nonnegative integer")  # noqa: TRY003
+        if (
+            isinstance(coalesce_ms, bool)
+            or not isinstance(coalesce_ms, (int, float))
+            or not math.isfinite(coalesce_ms)
+            or coalesce_ms < 0
+        ):
+            raise ValueError("coalesce_ms must be finite and nonnegative")  # noqa: TRY003
         self.profile = model.profile
+        self._model = model
         self._max_batch_size = max_batch_size
-        self._coalesce_seconds = float(coalesce_ms) / 1_000
+        self._coalesce_seconds = coalesce_ms / 1000
         self._cache_size = cache_size
-        self._cache: OrderedDict[str, EmbeddingVector] = OrderedDict()
-        self._pending: dict[str, asyncio.Future[_BatchResult]] = {}
-        self._inflight: dict[str, asyncio.Future[_BatchResult]] = {}
-        self._flush_task: asyncio.Task[None] | None = None
-        self._batch_tasks: set[asyncio.Task[None]] = set()
+        self._cache: OrderedDict[tuple[bool, str], EmbeddingVector] = OrderedDict()
+        self._pending: dict[tuple[bool, str], asyncio.Future[_EmbeddedText]] = {}
+        self._queued: dict[tuple[bool, str], asyncio.Future[_EmbeddedText]] = {}
+        self._flush_handle: asyncio.TimerHandle | None = None
+        self._tasks: set[asyncio.Task[None]] = set()
 
     async def embed(self, texts: tuple[str, ...], /) -> EmbeddingResult:
-        values = tuple(texts)
-        if not values:
-            return EmbeddingResult(vectors=(), usage=InferenceUsage(requests=0))
-        if any(not isinstance(text, str) for text in values):
-            raise ValueError("embedding texts must be strings")  # noqa: TRY003
+        """Embed documents, sharing repeated texts across concurrent calls."""
 
-        unique = tuple(dict.fromkeys(values))
+        return await self._embed(texts, query=False)
+
+    async def embed_query(self, texts: tuple[str, ...], /) -> EmbeddingResult:
+        """Preserve provider query semantics, sharing symmetric models' cache."""
+
+        return await self._embed(texts, query=isinstance(self._model, QueryEmbeddingModel))
+
+    async def _embed(self, texts: tuple[str, ...], *, query: bool) -> EmbeddingResult:
+        if not texts:
+            return EmbeddingResult(vectors=())
+        loop = asyncio.get_running_loop()
         vectors: dict[str, EmbeddingVector] = {}
-        waiters: dict[str, asyncio.Future[_BatchResult]] = {}
-        for text in unique:
-            cached = self._cache.get(text)
-            if cached is not None:
-                self._cache.move_to_end(text)
-                vectors[text] = cached
+        waiting: dict[str, asyncio.Future[_EmbeddedText]] = {}
+        for text in texts:
+            key = (query, text)
+            if key in self._cache:
+                vectors[text] = self._cache[key]
+                self._cache.move_to_end(key)
                 continue
-            future = self._inflight.get(text)
+            future = self._pending.get(key)
             if future is None:
-                future = self._pending.get(text)
-            if future is None:
-                future = asyncio.get_running_loop().create_future()
-                future.add_done_callback(_consume_future_exception)
-                self._pending[text] = future
-                if self._flush_task is None or self._flush_task.done():
-                    self._flush_task = asyncio.create_task(self._flush_after_window())
-            waiters[text] = future
-
-        usages: dict[int, InferenceUsage] = {}
-        if waiters:
-            results = await asyncio.gather(
-                *(asyncio.shield(future) for future in waiters.values()),
-            )
-            for text, result in zip(waiters, results, strict=True):
-                vectors[text] = result.vectors[0]
-                usages.setdefault(id(result.batch_id), result.usage)
-
-        usage = _combine_usage(tuple(usages.values()))
+                future = loop.create_future()
+                future.add_done_callback(_observe_failure)
+                self._pending[key] = future
+                self._queued[key] = future
+            waiting[text] = future
+        if self._queued and self._flush_handle is None:
+            # Even a zero window yields to callers already runnable on this
+            # event loop before any provider request starts.
+            self._flush_handle = loop.call_later(self._coalesce_seconds, self._flush)
+        results = await asyncio.gather(*(asyncio.shield(future) for future in waiting.values()))
+        batches: dict[object, InferenceUsage] = {}
+        for text, result in zip(waiting, results, strict=True):
+            vectors[text] = result.vector
+            batches[result.batch] = result.usage
+        usages = tuple(batches.values())
+        input_tokens = tuple(usage.input_tokens for usage in usages if usage.input_tokens is not None)
+        output_tokens = tuple(usage.output_tokens for usage in usages if usage.output_tokens is not None)
         return EmbeddingResult(
-            vectors=tuple(vectors[text] for text in values),
-            usage=usage,
+            vectors=tuple(vectors[text] for text in texts),
+            usage=InferenceUsage(
+                requests=sum(usage.requests for usage in usages),
+                input_tokens=sum(input_tokens) if input_tokens else None,
+                output_tokens=sum(output_tokens) if output_tokens else None,
+            ),
         )
 
-    async def _flush_after_window(self) -> None:
-        if self._coalesce_seconds:
-            await asyncio.sleep(self._coalesce_seconds)
-        else:
-            await asyncio.sleep(0)
-        pending = self._pending
-        self._pending = {}
-        if not pending:
-            return
-        texts = tuple(pending)
-        for start in range(0, len(texts), self._max_batch_size):
-            batch = texts[start : start + self._max_batch_size]
-            futures = {text: pending[text] for text in batch}
-            for text, future in futures.items():
-                self._inflight[text] = future
-            task = asyncio.create_task(self._run_batch(batch, futures))
-            self._batch_tasks.add(task)
-            task.add_done_callback(self._batch_tasks.discard)
+    def _flush(self) -> None:
+        self._flush_handle = None
+        queued, self._queued = self._queued, {}
+        # Query/document requests have different provider semantics, so they
+        # cannot share a provider batch even when they arrive in the same turn.
+        for query in (False, True):
+            members = tuple((key, future) for key, future in queued.items() if key[0] == query)
+            for start in range(0, len(members), self._max_batch_size):
+                task = asyncio.create_task(self._run_batch(members[start : start + self._max_batch_size], query=query))
+                self._tasks.add(task)
+                task.add_done_callback(self._tasks.discard)
 
-    async def _run_batch(  # noqa: C901
-        self,
-        texts: tuple[str, ...],
-        futures: dict[str, asyncio.Future[_BatchResult]],
+    async def _run_batch(
+        self, members: tuple[tuple[tuple[bool, str], asyncio.Future[_EmbeddedText]], ...], *, query: bool
     ) -> None:
+        texts = tuple(key[1] for key, _ in members)
         try:
-            result = await self._model.embed(texts)
-            if len(result.vectors) != len(texts):
-                raise ValueError("embedding provider returned the wrong vector count")  # noqa: TRY003, TRY301
-            vectors = tuple(tuple(vector) for vector in result.vectors)
-            shared = _BatchResult(vectors=vectors, usage=result.usage, batch_id=object())
-            if self._cache_size:
-                for text, vector in zip(texts, vectors, strict=True):
-                    self._cache[text] = vector
-                    self._cache.move_to_end(text)
-                    while len(self._cache) > self._cache_size:
+            if query and isinstance(self._model, QueryEmbeddingModel):
+                result = await self._model.embed_query(texts)
+            else:
+                result = await self._model.embed(texts)
+            if len(result.vectors) != len(members):
+                raise ValueError("embedding vector count does not match batch text count")  # noqa: TRY003, TRY301
+        except (Exception, asyncio.CancelledError) as error:
+            for _, future in members:
+                future.set_exception(error)
+        else:
+            batch = object()
+            for (key, future), vector in zip(members, result.vectors, strict=True):
+                if self._cache_size:
+                    self._cache[key] = vector
+                    self._cache.move_to_end(key)
+                    if len(self._cache) > self._cache_size:
                         self._cache.popitem(last=False)
-            for index, text in enumerate(texts):
-                future = futures[text]
-                if not future.done():
-                    future.set_result(
-                        _BatchResult(
-                            vectors=(vectors[index],),
-                            usage=shared.usage,
-                            batch_id=shared.batch_id,
-                        )
-                    )
-        except BaseException as error:
-            for future in futures.values():
-                if not future.done():
-                    future.set_exception(error)
+                future.set_result(_EmbeddedText(vector, result.usage, batch))
         finally:
-            for text, future in futures.items():
-                if self._inflight.get(text) is future:
-                    self._inflight.pop(text, None)
-
-
-def _combine_usage(values: tuple[InferenceUsage, ...]) -> InferenceUsage:
-    if not values:
-        return InferenceUsage(requests=0)
-    return InferenceUsage(
-        requests=sum(value.requests for value in values),
-        input_tokens=_sum_optional(value.input_tokens for value in values),
-        output_tokens=_sum_optional(value.output_tokens for value in values),
-    )
-
-
-def _sum_optional(values: Any) -> int | None:
-    values = tuple(values)
-    if any(value is None for value in values):
-        return None
-    return sum(values)
-
-
-def _consume_future_exception(future: asyncio.Future[object]) -> None:
-    """Prevent a failed shared future from becoming an unobserved warning."""
-
-    if not future.cancelled():
-        future.exception()
+            for key, _ in members:
+                del self._pending[key]
 
 
 __all__ = ["CoalescingEmbeddingModel"]

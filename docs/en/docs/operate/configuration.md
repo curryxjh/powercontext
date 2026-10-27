@@ -86,7 +86,7 @@ Server settings use the `POWERCONTEXT_SERVER_` prefix.
 | `POWERCONTEXT_SERVER_RUNTIME_RECALL_GATE_ROUND2_MIN_SEMANTIC_SIMILARITY` | `0.10` | Semantic-similarity admission floor for the second expansion round; must not exceed the first round's value |
 | `POWERCONTEXT_SERVER_RUNTIME_RECALL_GATE_ALLOW_WITH_RERANK` | `false` | Whether expansion may still run when `MEMORY_RERANK_ENABLED` is set; by default reranking ends the expansion |
 | `POWERCONTEXT_SERVER_RUNTIME_MEMORY_SCHEDULE_SECONDS` | unset | Memory automatic admission interval; `SCHEDULE_SECONDS` remains a compatibility alias |
-| `POWERCONTEXT_SERVER_RUNTIME_TOPIC_MEMORY_SCHEDULE_SECONDS` | unset | Topic Memory automatic admission interval; unset disables new automatic admission |
+| `POWERCONTEXT_SERVER_RUNTIME_TOPIC_MEMORY_SCHEDULE_SECONDS` | unset | Topic Memory time admission interval; unset disables time admission |
 | `POWERCONTEXT_SERVER_RUNTIME_TOPIC_MEMORY_SOURCE_WINDOW_LIMIT` | `10` | Maximum Sources per Topic Memory Window, capped at 100; one Scope invocation can finish several Windows |
 | `POWERCONTEXT_SERVER_RUNTIME_TOPIC_MEMORY_HISTORY_MAX_CANDIDATES` | `20` | Maximum historical Topic candidates considered while processing |
 | `POWERCONTEXT_SERVER_RUNTIME_TOPIC_MEMORY_HISTORY_RRF_THRESHOLD` | `70` | RRF acceptance threshold normalized to `0..100` |
@@ -295,7 +295,7 @@ Handoff Report API routes are independently enabled by default. See
 The Artifact Processing Supervisor is enabled by the default `all` role. OceanBase deployments may run `api` and
 `background` separately; `powercontext server run --role background` starts no HTTP, MCP, or Dashboard listener, and
 multiple background candidates use the database Lease to elect one active Leader. SQLite and embedded seekdb support
-only the single-process `all` role. Automatic Topic Memory waves remain disabled until a positive interval is set;
+only the single-process `all` role. Automatic Topic Memory waves require a positive interval or a source count threshold;
 explicit flush work remains recoverable regardless of that interval. Topic workers need file-backed SQLite: configuring
 a generation model with an in-memory SQLite database is rejected before processing is advertised. Use a persistent
 `POWERCONTEXT_SERVER_DATABASE_URL`, such as `sqlite+aiosqlite:////srv/powercontext/runtime.db`.
@@ -363,7 +363,7 @@ finite window controlled by `SOURCE_WINDOW_LIMIT` and exposes only Content Sourc
 `"kind": "task-outcome"` to the model. It creates pending Experience Candidates in the Review Inbox; it does not
 approve them, place them in PreparedContext, create a managed Skill, export it to an Agent target, or execute anything.
 Memory and Experience keep independent scheduling intervals, Worker quotas, and business cursors. Unsetting an interval
-stops new automatic admission for that Family while preserving accepted work.
+stops time admission for that Family while preserving accepted work. Memory count admission, when configured, remains active.
 See [Create and review an Experience](../workflows/create-and-review-experience.md) for setup and verification steps.
 
 ### Agent Skill targets
@@ -451,6 +451,40 @@ Normalization defaults to `unit`; timeout and batch size are optional controls. 
 bundled sqlite-vec extension. The Server probes it when opening the database, and startup fails if the installed library
 is incompatible with the platform or SQLite build. Full-text search remains available without an embedding profile.
 For configuration and capability verification, see [Configure vector search](../workflows/configure-vector-search.md).
+
+## Source count admission
+
+The Python SDK's `RuntimeConfig` accepts `memory_source_count_threshold` and
+`topic_memory_source_count_threshold`. Each defaults to `None`, disabling count admission, and otherwise requires a
+strictly positive integer. Booleans, strings, and floating-point numbers are rejected.
+
+```python
+from powercontext.builtin.runtime import RuntimeConfig
+
+runtime = RuntimeConfig(
+    memory_source_count_threshold=3,
+    source_window_limit=1,
+    topic_memory_source_count_threshold=5,
+)
+```
+
+Each Scope and Family counts persisted Source journal identities after its own last successfully committed cursor.
+Duplicate capture and receipt trust upgrades add no identities. Lineage-only Sources count toward admission but remain
+excluded from generation evidence. A configured Generation provider and persistent database are still required.
+
+Count and time conditions are alternatives: either can admit work. Explicit `flush()` bypasses the count threshold.
+Memory processes one bounded window and rechecks the remaining count. In the example, three pending Sources admit one
+Source; the remaining two wait for another input, the time condition, or an explicit flush. Topic Memory completes its
+accepted wave using the existing window limit, without reapplying the threshold between windows.
+
+Acceptance is durable. Failed invocations retain the ordinary retry behavior and do not advance the successful cursor.
+Reopening the database preserves both inputs below the threshold and accepted work awaiting completion. Discovery
+pages through dirty Scope metadata and checks indexed journal ranges up to the threshold, without reading Source bodies.
+It polls for count eligibility approximately once per second per completed pass while worker capacity is available;
+generation and retry time are additional.
+
+For Server deployments, supply these strict integer values in the JSON runtime environment setting, for example
+`POWERCONTEXT_SERVER_RUNTIME='{"memory_source_count_threshold":3,"topic_memory_source_count_threshold":5}'`.
 
 ## CLI Server connection
 
