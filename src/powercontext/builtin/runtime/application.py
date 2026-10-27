@@ -24,7 +24,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from pydantic import BaseModel, JsonValue, ValidationError
 
@@ -249,6 +249,7 @@ from powercontext.builtin.runtime.recall_sufficiency import (
     build_recall_candidates,
     recall_effort,
 )
+from powercontext.builtin.runtime.source_lifecycle import SourceLifecycleEvent, SourceLifecycleService
 from powercontext.builtin.runtime.statistics import RelationalScopedStatistics, overview_selection
 from powercontext.builtin.scope import ScopeApplication, ScopeDescriptor, ScopeSelection
 from powercontext.builtin.scope.subject_sources import SubjectSourceService
@@ -324,6 +325,7 @@ TopicMemoryGet = Callable[[str, ArtifactRef], Awaitable[PublishedTopicMemory]]
 TopicMemoryBrowse = Callable[..., Awaitable[tuple[TopicMemoryCurrentItem, ...]]]
 TopicMemoryFlush = Callable[[str], Awaitable[bool]]
 TopicMemorySearchObserver = Callable[[str, bool], None]
+LifecycleServiceFactory = Callable[[str], SourceLifecycleService]
 
 logger = logging.getLogger(__name__)
 
@@ -458,6 +460,7 @@ class _RuntimeStateError(RuntimeError):
             "skill-usage": "Managed Skill usage recording is not configured",
             "statistics": "Statistics services are not configured",
             "topic-memory-browse": "Topic Memory browsing is not configured",
+            "source-lifecycle": "Source lifecycle services are not configured",
         }
         super().__init__(messages[code])
 
@@ -506,6 +509,68 @@ class ScopedSourceApplication:
                 if span is not None:
                     span.set_attributes({_MEMORY_CAPTURE_SOURCE_COUNT: 1})
             return SourceReceipt(source_ref=context.sources.catalog.as_ref(source), sequence=sequence)
+
+
+class ScopedSourceLifecycleApplication:
+    """Register and propagate one Scope's Source dependency graph."""
+
+    def __init__(self, runtime: BuiltinRuntime, scope_id: str) -> None:
+        self._runtime = runtime
+        self.scope_id = validate_scope_id(scope_id)
+
+    def _service(self) -> SourceLifecycleService:
+        if self._runtime._lifecycle_service is None:
+            raise _RuntimeStateError("source-lifecycle")
+        return self._runtime._lifecycle_service(self.scope_id)
+
+    async def register_source(self, node_id: str, source_ref: SourceRef, *, revision: int) -> None:
+        async with self._runtime._scoped_operation(self.scope_id), self._runtime._locked(self.scope_id):
+            await self._service().register_source(node_id, source_ref, revision=revision)
+
+    async def register_memory(
+        self,
+        node_id: str,
+        citation: MemoryCitation,
+        *,
+        parents: tuple[str, ...],
+        policy: Literal["all", "any"],
+    ) -> None:
+        async with self._runtime._scoped_operation(self.scope_id), self._runtime._locked(self.scope_id):
+            await self._service().register_memory(node_id, citation, parents=parents, policy=policy)
+
+    async def register_topic(
+        self,
+        node_id: str,
+        artifact_ref: ArtifactRef,
+        *,
+        parents: tuple[str, ...],
+        policy: Literal["all", "any"],
+    ) -> None:
+        async with self._runtime._scoped_operation(self.scope_id), self._runtime._locked(self.scope_id):
+            await self._service().register_topic(node_id, artifact_ref, parents=parents, policy=policy)
+
+    async def apply(self, event: SourceLifecycleEvent, /) -> list[str]:
+        async with self._runtime._scoped_operation(self.scope_id), self._runtime._locked(self.scope_id):
+            return await self._service().apply(event)
+
+    async def resolve(
+        self,
+        node_id: str,
+        *,
+        purpose: Literal["generation", "audit"],
+    ) -> SourceRef | MemoryCitation | ArtifactRef:
+        async with self._runtime._scope_operation(self.scope_id):
+            return await self._service().resolve(node_id, purpose=purpose)
+
+
+class SourceLifecycleApplication:
+    """Select the Source lifecycle service for one Scope."""
+
+    def __init__(self, runtime: BuiltinRuntime) -> None:
+        self._runtime = runtime
+
+    def for_scope(self, scope_id: str, /) -> ScopedSourceLifecycleApplication:
+        return ScopedSourceLifecycleApplication(self._runtime, scope_id)
 
 
 class SourceApplication:
@@ -3044,6 +3109,7 @@ class BuiltinRuntime:
         scheduled_experience_runner: ScheduledExperienceRunner | None = None,
         remote_ingestion: RemoteIngestion | None = None,
         dream_service: DreamService | None = None,
+        lifecycle_service: LifecycleServiceFactory | None = None,
         generation_concurrency: int = 4,
     ) -> None:
         if source_window_limit < 1:
@@ -3059,6 +3125,7 @@ class BuiltinRuntime:
         self.subject_sources = subject_sources
         self._generation_service = generation_service
         self._dream_service = dream_service
+        self._lifecycle_service = lifecycle_service
         self._review_evidence_authorizer: ScopedEvidenceAuthorizer | None = None
         self._review_authorization_context: AuthorizationContext = nullcontext
         self._generation_slots = asyncio.Semaphore(generation_concurrency)
@@ -3118,6 +3185,7 @@ class BuiltinRuntime:
         self._scheduler: AsyncIOScheduler | None = None
         self._scheduler_runtime_key: str | None = None
         self.sources = SourceApplication(self)
+        self.lifecycle = SourceLifecycleApplication(self)
         self.ingestion = RemoteIngestionApplication(self, remote_ingestion)
         self.code = CodeApplication(self, code_service or CodeService(CodeConfig()))
         self.context = ContextApplication(self)

@@ -178,6 +178,26 @@ SOURCES_TABLE = Table(
     UniqueConstraint("scope_id", "journal_position", name="uq_pc_sources_scope_journal_position"),
 )
 
+SOURCE_LIFECYCLE_NODES_TABLE = Table(
+    "pc_source_lifecycle_nodes",
+    SHARED_METADATA,
+    Column("scope_id", identity_string(MAX_SCOPE_ID_LENGTH), primary_key=True),
+    Column("node_id", identity_string(MAX_SOURCE_ID_LENGTH), primary_key=True),
+    Column("kind", identity_string(16), nullable=False),
+    Column("reference", _canonical_payload_type(), nullable=False),
+    Column("parents", _canonical_payload_type(), nullable=False),
+    Column("policy", identity_string(8)),
+    Column("available", Boolean, nullable=False),
+    Column("source_revision", Integer),
+    Column("event_sequence", BigInteger),
+    Column("event_reason", _entry_text_type()),
+    ForeignKeyConstraint(("scope_id",), ("pc_scopes.scope_id",), ondelete="CASCADE"),
+    CheckConstraint("kind IN ('source', 'memory', 'topic')", name="ck_pc_source_lifecycle_kind"),
+    CheckConstraint("policy IS NULL OR policy IN ('all', 'any')", name="ck_pc_source_lifecycle_policy"),
+    CheckConstraint("source_revision IS NULL OR source_revision > 0", name="ck_pc_source_lifecycle_revision"),
+    CheckConstraint("event_sequence IS NULL OR event_sequence > 0", name="ck_pc_source_lifecycle_sequence"),
+)
+
 SOURCE_JOURNAL_HEADS_TABLE = Table(
     "pc_source_journal_heads",
     SHARED_METADATA,
@@ -898,6 +918,7 @@ RECALL_TOKEN_DAILY_TABLE = Table(
 SHARED_TABLES = (
     SOURCE_JOURNAL_HEADS_TABLE,
     SOURCES_TABLE,
+    SOURCE_LIFECYCLE_NODES_TABLE,
     ARTIFACTS_TABLE,
     ARTIFACT_HEADS_TABLE,
     ARTIFACT_LINEAGE_SOURCES_TABLE,

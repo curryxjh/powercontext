@@ -101,6 +101,7 @@ from powercontext.builtin.artifacts.skill.distribution import RemoteSkillDistrib
 from powercontext.builtin.artifacts.skill.publication import ManagedSkillPublicationService
 from powercontext.builtin.artifacts.skill.registry import ExternalSkillRegistryService
 from powercontext.builtin.artifacts.topic_memory import (
+    MAX_TOPIC_MEMORY_SEARCH_LIMIT,
     TOPIC_MEMORY_SOURCE_WINDOW_BINDING,
     PublishedTopicMemory,
     TopicMemory,
@@ -190,6 +191,7 @@ from powercontext.builtin.runtime.protocols import (
 )
 from powercontext.builtin.runtime.recall import RelationalRecallTokenEstimator
 from powercontext.builtin.runtime.recurrence import RelationalRecurrenceLedger
+from powercontext.builtin.runtime.source_lifecycle import SourceLifecycleService
 from powercontext.builtin.runtime.statistics import RelationalScopedStatistics
 from powercontext.builtin.scope import ScopeApplication
 from powercontext.builtin.scope.subject_sources import SubjectSourceService
@@ -507,6 +509,18 @@ class _ScopedServices:
             estimator=self.token_estimator,
         )
 
+    def lifecycle(self) -> SourceLifecycleService:
+        """Return the persisted Source dependency graph for this Scope."""
+
+        return SourceLifecycleService(
+            database=self.database,
+            scope_id=self.scope_id,
+            sources=self.repositories.sources,
+            artifacts=self.repositories.artifacts,
+            memory_factory=lambda connection: self.memory(self.sources(connection)[1], connection),
+            lock=self.source_lock,
+        )
+
 
 class RelationalContexts:
     """Compose typed, scope-bound contexts without owning the database lifecycle."""
@@ -733,6 +747,11 @@ class RelationalContexts:
         """Return Candidate and reviewed Artifact operations bound to one scope."""
 
         return self._services_for(scope_id).review()
+
+    def lifecycle(self, scope_id: str, /) -> SourceLifecycleService:
+        """Return the persisted Source dependency graph for one Scope."""
+
+        return self._services_for(scope_id).lifecycle()
 
     def dream(
         self,
@@ -991,16 +1010,34 @@ class RelationalContexts:
             embedding_profile = query_embedding.embedding_profile
         scope = validate_scope_id(scope_id)
         async with self.database.transaction() as connection:
-            return await self.repositories.topic_memories.search(
+            withdrawn = await self.lifecycle(scope).unavailable_topic_refs(connection)
+            search_limit = (
+                min(MAX_TOPIC_MEMORY_SEARCH_LIMIT, limit + len(withdrawn))
+                if 1 <= limit <= MAX_TOPIC_MEMORY_SEARCH_LIMIT
+                else limit
+            )
+            result = await self.repositories.topic_memories.search(
                 connection,
                 scope,
                 query,
-                limit=limit,
+                limit=search_limit,
                 mode=mode,
                 query_vector=query_vector,
                 embedding_profile=embedding_profile,
                 admission=admission,
             )
+            if withdrawn:
+                result = result.model_copy(
+                    update={
+                        "hits": tuple(
+                            hit
+                            for hit in result.hits
+                            if (hit.artifact_ref.family, hit.artifact_ref.artifact_id, hit.artifact_ref.revision)
+                            not in withdrawn
+                        )[:limit]
+                    }
+                )
+            return result
 
     async def search_skills(
         self,

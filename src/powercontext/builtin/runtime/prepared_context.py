@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from itertools import chain
@@ -106,6 +107,7 @@ class PreparedContextBuild:
     origins: tuple[PreparedContextOrigin, ...]
     omissions: PreparedContextOmissions = PreparedContextOmissions()
     code_origins: tuple[CodeEvidenceRef, ...] = ()
+    fragments: tuple[PreparedContextFragment, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -115,6 +117,16 @@ class MemoryEntryAddress:
     memory: ArtifactAddress
     entry_id: str
     entry_version_id: str
+
+
+@dataclass(frozen=True)
+class PreparedContextFragment:
+    """One literal Memory span selected for evidence-focused context."""
+
+    address: MemoryEntryAddress
+    start: int
+    end: int
+    text: str
 
 
 PreparedContextOrigin = MemoryCitation | ArtifactRef | MemoryEntryAddress | ArtifactAddress
@@ -235,16 +247,24 @@ class PreparedContextBuilder:
         if sum(len(candidates.hits) for candidates in experience_candidates) > self.experience_candidate_limit:
             raise PreparedContextInvariantError("experience-candidate-limit")
 
-        content, origins, omissions = self._select_entries(
-            request=request,
-            current_scope_id=current_scope_id,
-            memory_candidates=memory_candidates,
-            experience_candidates=experience_candidates,
-            profile_candidates=profile_candidates,
-            topic_memory_hits=topic_memory_hits,
-        )
+        if request.evidence_selection:
+            content, origins, omissions, fragments = self._select_evidence(
+                request=request,
+                current_scope_id=current_scope_id,
+                memory_candidates=memory_candidates,
+            )
+        else:
+            content, origins, omissions = self._select_entries(
+                request=request,
+                current_scope_id=current_scope_id,
+                memory_candidates=memory_candidates,
+                experience_candidates=experience_candidates,
+                profile_candidates=profile_candidates,
+                topic_memory_hits=topic_memory_hits,
+            )
+            fragments = ()
         if content is None:
-            return PreparedContextBuild(context=self.empty(), origins=(), omissions=omissions)
+            return PreparedContextBuild(context=self.empty(), origins=(), omissions=omissions, fragments=fragments)
         content_bytes = len(content.encode("utf-8"))
         # The assembly path is bounded by construction (every fitted item is measured against
         # `max_bytes`), so the ceiling check belongs to the non-assembly renderer only.
@@ -254,6 +274,7 @@ class PreparedContextBuilder:
             context=PreparedContext(status="ready", content=content, content_bytes=content_bytes),
             origins=origins,
             omissions=omissions,
+            fragments=fragments,
         )
 
     def probe_budget(
@@ -277,14 +298,21 @@ class PreparedContextBuilder:
         counters because both go through :meth:`_select_entries`.
         """
 
-        content, origins, omissions = self._select_entries(
-            request=request,
-            current_scope_id=current_scope_id,
-            memory_candidates=memory_candidates,
-            experience_candidates=experience_candidates,
-            profile_candidates=profile_candidates,
-            topic_memory_hits=topic_memory_hits,
-        )
+        if request.evidence_selection:
+            content, origins, omissions, _ = self._select_evidence(
+                request=request,
+                current_scope_id=current_scope_id,
+                memory_candidates=memory_candidates,
+            )
+        else:
+            content, origins, omissions = self._select_entries(
+                request=request,
+                current_scope_id=current_scope_id,
+                memory_candidates=memory_candidates,
+                experience_candidates=experience_candidates,
+                profile_candidates=profile_candidates,
+                topic_memory_hits=topic_memory_hits,
+            )
         content_bytes = 0 if content is None else len(content.encode("utf-8"))
         return RecallBudgetView(
             max_bytes=request.max_bytes,
@@ -346,6 +374,61 @@ class PreparedContextBuilder:
         if not entries:
             return None, (), omissions
         return _render(entries), tuple(entry.origin for entry in entries), omissions
+
+    def _select_evidence(  # noqa: C901
+        self,
+        *,
+        request: PrepareContextRequest,
+        current_scope_id: str | None,
+        memory_candidates: Sequence[PreparedMemoryCandidates],
+    ) -> tuple[
+        str | None,
+        tuple[PreparedContextOrigin, ...],
+        PreparedContextOmissions,
+        tuple[PreparedContextFragment, ...],
+    ]:
+        """Select literal, query-relevant spans and measure the complete wire envelope."""
+
+        candidates: list[tuple[float, int, int, int, int, MemoryEntryAddress, str]] = []
+        query_terms = _evidence_terms(request.query)
+        for hit_rank, group in enumerate(memory_candidates):
+            for candidate_rank, hit in enumerate(group.hits):
+                if group.memory_ref is None or hit.memory_ref != group.memory_ref:
+                    raise PreparedContextInvariantError("memory-ref-mismatch")
+                address = MemoryEntryAddress(
+                    memory=ArtifactAddress(
+                        scope_id=group.scope_id or (current_scope_id or ""),
+                        artifact=hit.memory_ref,
+                    ),
+                    entry_id=hit.entry_id,
+                    entry_version_id=hit.entry_version_id,
+                )
+                for start, end in _evidence_spans(hit.text):
+                    text = hit.text[start:end]
+                    if not text.strip():
+                        continue
+                    score = _evidence_score(text, query_terms)
+                    if score <= 0:
+                        continue
+                    candidates.append((score, hit_rank, candidate_rank, start, end, address, hit.text))
+
+        candidates.sort(key=lambda value: (-value[0], value[1], value[2], value[3]))
+        selected: list[PreparedContextFragment] = []
+        origins: list[PreparedContextOrigin] = []
+        for _, _, _, start, end, address, source_text in candidates:
+            if any(item.address == address and not (end <= item.start or start >= item.end) for item in selected):
+                continue
+            fragment = PreparedContextFragment(address=address, start=start, end=end, text=source_text[start:end])
+            if _rendered_evidence_bytes((*selected, fragment)) > request.max_bytes:
+                continue
+            selected.append(fragment)
+            origins.append(address)
+            if len(selected) >= self.entry_limit:
+                break
+
+        if not selected:
+            return None, (), PreparedContextOmissions(), ()
+        return _render_evidence(selected), tuple(origins), PreparedContextOmissions(), tuple(selected)
 
     def _select_text(
         self,
@@ -722,6 +805,78 @@ def _render_entry(entry: _PreparedContextEntry) -> dict[str, object]:
 
 def _rendered_bytes(entries: Sequence[_PreparedContextEntry]) -> int:
     return len(_render(entries).encode("utf-8"))
+
+
+_EVIDENCE_TOKEN_RE = re.compile(r"[a-z0-9]+|[\u3400-\u9fff]+", re.IGNORECASE)
+
+
+def _evidence_terms(query: str) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(token.casefold() for token in _EVIDENCE_TOKEN_RE.findall(query)))
+
+
+def _evidence_spans(text: str) -> tuple[tuple[int, int], ...]:
+    """Return sentence-like spans while retaining their original character offsets."""
+
+    spans: list[tuple[int, int]] = []
+    start = 0
+    for match in re.finditer(r"[.!?。\uff01\uff1f](?:\s+|$)", text):
+        end = match.end()
+        left = start
+        right = end
+        while left < right and text[left].isspace():
+            left += 1
+        while right > left and text[right - 1].isspace():
+            right -= 1
+        if left < right:
+            spans.append((left, right))
+        start = end
+    if start < len(text):
+        left = start
+        right = len(text)
+        while left < right and text[left].isspace():
+            left += 1
+        while right > left and text[right - 1].isspace():
+            right -= 1
+        if left < right:
+            spans.append((left, right))
+    return tuple(spans)
+
+
+def _evidence_score(text: str, query_terms: Sequence[str]) -> int:
+    if not query_terms:
+        return 0
+    tokens = _EVIDENCE_TOKEN_RE.findall(text.casefold())
+    counts = {term: tokens.count(term) for term in query_terms}
+    matched = sum(counts.values())
+    distinct = sum(count > 0 for count in counts.values())
+    phrase_bonus = 3 if " ".join(query_terms) in " ".join(tokens) else 0
+    return matched + distinct + phrase_bonus
+
+
+def _render_evidence(fragments: Sequence[PreparedContextFragment]) -> str:
+    envelope = {
+        "trust": "untrusted_history",
+        "items": [
+            {
+                "citation": {
+                    "scope_id": fragment.address.memory.scope_id,
+                    "memory_ref": fragment.address.memory.artifact.model_dump(mode="json"),
+                    "entry_id": fragment.address.entry_id,
+                    "entry_version_id": fragment.address.entry_version_id,
+                },
+                "content": fragment.text,
+                "start": fragment.start,
+                "end": fragment.end,
+            }
+            for fragment in fragments
+        ],
+    }
+    encoded = json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
+    return "\n\n".join((TRUST_POLICY, f"{_BEGIN_MARKER}\n{encoded}\n{_END_MARKER}"))
+
+
+def _rendered_evidence_bytes(fragments: Sequence[PreparedContextFragment]) -> int:
+    return len(_render_evidence(fragments).encode("utf-8"))
 
 
 def _truncate_utf8(text: str, byte_budget: int) -> str:
