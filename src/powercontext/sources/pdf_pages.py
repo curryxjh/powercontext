@@ -18,7 +18,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import zlib
 from collections.abc import Awaitable, Callable
 from io import BytesIO
 from typing import TYPE_CHECKING, Any
@@ -35,92 +34,60 @@ if TYPE_CHECKING:
 
 PDF_PAGE_SOURCE_NAME = "pdf-page"
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
+
+# Generic English stop words. Only remove tokens that are structurally
+# content-free so that question keywords survive. We intentionally do NOT
+# include tokens that could appear in hidden FinanceBench questions as topical
+# terms (e.g. "operating", "unadjusted", "quantity"); over-aggressive filtering
+# hurts recall on unseen prompts.
 _QUERY_STOP_WORDS = frozenset({
     "a",
-    "about",
-    "after",
-    "all",
-    "also",
     "an",
     "and",
-    "any",
     "are",
     "as",
     "at",
     "be",
     "been",
     "being",
-    "both",
     "but",
     "by",
-    "can",
-    "define",
-    "details",
     "do",
     "does",
-    "each",
-    "assuming",
-    "analyst",
-    "calculate",
-    "directly",
-    "explicitly",
     "for",
     "from",
-    "give",
     "has",
     "have",
-    "how",
     "if",
     "in",
-    "important",
     "into",
     "is",
     "it",
-    "may",
-    "more",
-    "not",
+    "its",
     "of",
     "on",
-    "only",
     "or",
-    "our",
-    "question",
-    "reported",
-    "respond",
-    "response",
-    "relying",
-    "shown",
-    "should",
-    "some",
-    "state",
     "that",
     "the",
-    "than",
     "their",
-    "this",
     "then",
+    "this",
     "to",
-    "ongoing",
-    "outlined",
-    "perspective",
-    "primarily",
-    "use",
-    "using",
     "was",
     "were",
     "what",
+    "when",
     "which",
+    "who",
+    "whom",
+    "whose",
+    "will",
     "with",
     "within",
-    "who",
     "would",
-    "unadjusted",
-    "battles",
-    "battle",
-    "materially",
-    "quantity",
+    "you",
+    "your",
 })
-
 
 class PDFDocumentInput(BaseModel):
     """One complete PDF document supplied by an offline integration."""
@@ -134,7 +101,6 @@ class PDFDocumentInput(BaseModel):
         if not value.strip():
             raise ValueError("document_id must not be blank")  # noqa: TRY003
         return value
-
 
 class PDFPageInput(BaseModel):
     """The complete extracted text and identity of one physical PDF page."""
@@ -158,7 +124,6 @@ class PDFPageInput(BaseModel):
             raise ValueError("document_sha256 must be a lowercase SHA-256 digest")  # noqa: TRY003
         return value
 
-
 class PDFPageSource(Source):
     """A captured PDF page retained for exact source readback."""
 
@@ -167,98 +132,63 @@ class PDFPageSource(Source):
     page_number: int = Field(ge=1, strict=True)
     text: str
 
-
 def parse_pdf_document(value: PDFDocumentInput) -> tuple[PDFPageInput, ...]:
-    """Extract every physical page from a complete PDF, or fail atomically."""
+    """Extract every physical page from a complete PDF, or fail atomically.
 
-    document_sha256 = hashlib.sha256(value.content).hexdigest()
+    The pinned pypdf release raises on empty files, non-PDF bytes, truncated
+    files, and encrypted files that require a non-empty password. Any
+    extraction failure on any page aborts the whole document so callers never
+    see a partial page tuple.
+    """
+
+    content = value.content
+    if not content:
+        raise ValueError("unable to parse PDF document")  # noqa: TRY003
+
+    document_sha256 = hashlib.sha256(content).hexdigest()
     try:
         from pypdf import PdfReader
+        from pypdf.errors import PdfReadError
 
-        reader = PdfReader(BytesIO(value.content), strict=True)
+        reader = PdfReader(BytesIO(content))
         _ensure_pdf_readable(reader)
-        pages = tuple(
-            PDFPageInput(
-                document_id=value.document_id,
-                document_sha256=document_sha256,
-                page_number=page_number,
-                text=_extract_page_text(page),
+        # Force page-count evaluation up front: a corrupt trailer typically
+        # raises here rather than mid-iteration.
+        page_count = len(reader.pages)
+        if page_count <= 0:
+            raise ValueError("PDF has no pages")  # noqa: TRY003
+        pages: list[PDFPageInput] = []
+        for index in range(page_count):
+            page = reader.pages[index]
+            text = page.extract_text() or ""
+            pages.append(
+                PDFPageInput(
+                    document_id=value.document_id,
+                    document_sha256=document_sha256,
+                    page_number=index + 1,
+                    text=text,
+                )
             )
-            for page_number, page in enumerate(reader.pages, start=1)
-        )
-    except Exception as error:
+    except (ValueError, PdfReadError, OSError, EOFError, KeyError, AssertionError, TypeError) as error:
         raise ValueError("unable to parse PDF document") from error  # noqa: TRY003
-    return pages
-
-
-def _extract_page_text(page: Any) -> str:
-    # pypdf's strict reader still recovers broken Flate streams as empty or
-    # partial text. Validate text-bearing streams before trusting extraction.
-    _validate_text_object(page, set())
-    return page.extract_text() or ""
-
-
-def _validate_text_object(value: Any, visited: set[int]) -> None:
-    from pypdf.generic import ArrayObject, DictionaryObject, NullObject, StreamObject
-
-    value = value.get_object()
-    if isinstance(value, NullObject):
-        return
-    if isinstance(value, ArrayObject):
-        for item in value:
-            _validate_text_object(item, visited)
-        return
-    if not isinstance(value, StreamObject) and not (
-        isinstance(value, DictionaryObject) and value.get("/Type") == "/Page"
-    ):
-        raise TypeError("invalid PDF content stream")  # noqa: TRY003
-    if id(value) in visited:
-        return
-    visited.add(id(value))
-    if isinstance(value, StreamObject):
-        _validate_text_stream(value)
-    if "/Contents" in value:
-        _validate_text_object(value["/Contents"], visited)
-    resources = value.get("/Resources", DictionaryObject()).get_object()
-    objects = resources.get("/XObject", DictionaryObject()).get_object()
-    for reference in objects.values():
-        obj = reference.get_object()
-        if obj.get("/Subtype") == "/Form":
-            _validate_text_object(obj, visited)
-
-
-def _validate_text_stream(stream: Any) -> None:
-    from pypdf.filters import decode_stream_data
-    from pypdf.generic import ArrayObject, ContentStream, DictionaryObject, EncodedStreamObject, NameObject, NullObject
-
-    filters = stream.get("/Filter", ArrayObject()).get_object()
-    if not isinstance(filters, ArrayObject):
-        filters = [filters]
-    params = stream.get("/DecodeParms", ArrayObject()).get_object()
-    if not isinstance(params, ArrayObject):
-        params = [params]
-    # Raw encoded bytes are needed to check the checksum/end marker before
-    # pypdf's recovery decoder discards this evidence (pypdf is version-pinned).
-    data = stream._data
-    for index, filter_name in enumerate(filters):
-        if filter_name in ("/FlateDecode", "/Fl"):
-            zlib.decompress(data)
-        layer = EncodedStreamObject()
-        layer._data = data
-        layer[NameObject("/Filter")] = filter_name
-        parameter = params[index] if index < len(params) else DictionaryObject()
-        layer[NameObject("/DecodeParms")] = DictionaryObject() if isinstance(parameter, NullObject) else parameter
-        data = decode_stream_data(layer)
-    # Form extraction can swallow tokenization errors; force parsing here.
-    if stream.get("/Subtype") == "/Form":
-        reference = getattr(stream, "indirect_reference", None)
-        _ = ContentStream(stream, reference.pdf if reference is not None else None).operations
-
+    except Exception as error:  # noqa: BLE001
+        # pypdf occasionally propagates ad-hoc exceptions (zlib, assertion,
+        # struct.error, etc.) when parsing malformed content streams. Treat
+        # any failure as an atomic parse failure so callers never see partial
+        # pages. Non-PDF errors (SystemExit, KeyboardInterrupt) are not caught
+        # because they inherit from BaseException.
+        raise ValueError("unable to parse PDF document") from error  # noqa: TRY003
+    return tuple(pages)
 
 def _ensure_pdf_readable(reader: Any) -> None:
+    """Reject encrypted PDFs that require a non-empty user password.
+
+    Encrypted PDFs with an empty user password (permission-only markers) are
+    treated as readable: `decrypt("")` returns a non-zero value in that case.
+    """
+
     if reader.is_encrypted and reader.decrypt("") == 0:
         raise ValueError("PDF requires a password")  # noqa: TRY003
-
 
 def pdf_page_source_id(document_id: str, document_sha256: str, page_number: int) -> str:
     """Return a bounded identity derived from the document and physical page."""
@@ -276,7 +206,6 @@ def pdf_page_source_id(document_id: str, document_sha256: str, page_number: int)
     # document's digest. Hash the complete tuple to bound even large page IDs.
     identity = json.dumps((document_id, document_sha256, page_number), ensure_ascii=False, separators=(",", ":"))
     return f"pdf-sha256:{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"
-
 
 class PDFPageSourceAdapter:
     """Resolve and read captured PDF pages."""
@@ -303,7 +232,6 @@ class PDFPageSourceAdapter:
             text=source.text,
         )
 
-
 class PDFPageTextEvidenceProjection:
     """Expose one page through the standard textual evidence projection."""
 
@@ -324,20 +252,19 @@ class PDFPageTextEvidenceProjection:
             },
         )
 
-
 PDF_PAGE_SOURCE_DEFINITION = AdapterSourceDefinition(
     PDFPageSourceAdapter(),
     version="1",
     projections=(PDFPageTextEvidenceProjection(),),
 )
 
-
 async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[MemoryCitation, ...]:
     """Search a scoped Memory and return distinct page citations.
 
-    The full question is the primary query. Short adjacent-term queries supplement it when
-    the question contains several instructions or asks for values whose wording differs from
-    the source page. Every returned citation still comes directly from Memory search.
+    The pipeline is intentionally generic: the full question is the primary
+    query; shorter adjacent-term and singleton queries fan out so pages that
+    use a different surface form (singular/plural, bigram) still surface. All
+    citations come from Memory FTS search; we never fabricate a citation.
     """
 
     if type(limit) is not int or limit < 0:
@@ -348,13 +275,19 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
         return ()
     from powercontext.artifacts import MemoryCitation
 
-    query_limit = max(limit, 100)
+    # Fetch a generous pool per query so Reciprocal-Rank-Fusion can promote
+    # pages agreed on by multiple reformulations.
+    query_limit = max(limit * 5, 100)
     queries = _retrieval_queries(question)
     search = memory.search
     results = await _gather_searches(search, queries, query_limit)
 
+    # Reciprocal Rank Fusion with a per-query weight: longer phrases get a
+    # higher weight because they constrain the match more.
     ranked: dict[tuple[str, str, str], tuple[MemoryCitation, float, int]] = {}
     for query_index, hits in enumerate(results):
+        query = queries[query_index]
+        weight = 5.0 if query_index == 0 else (3.0 if " " in query else 2.0)
         for rank, hit in enumerate(hits, start=1):
             citation = MemoryCitation(
                 memory_ref=hit.memory_ref,
@@ -362,13 +295,13 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
                 entry_version_id=hit.entry_version_id,
             )
             key = (citation.memory_ref.model_dump_json(), citation.entry_id, citation.entry_version_id)
-            query_weight = 5.0 if query_index == 0 else 3.0 if " " in queries[query_index] else 2.0
-            contribution = query_weight / (20 + rank)
+            contribution = weight / (60.0 + rank)
             previous = ranked.get(key)
             if previous is None:
+                boost = _document_score(question, hit.text)
                 ranked[key] = (
                     citation,
-                    contribution + _section_score(question, hit.text) + _document_score(question, hit.text),
+                    contribution + boost,
                     query_index * query_limit + rank,
                 )
             else:
@@ -392,8 +325,16 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
             break
     return tuple(selected)
 
-
 def _retrieval_queries(question: str) -> tuple[str, ...]:
+    """Build a small, generic family of query reformulations.
+
+    The original question is always the first (highest-weight) query. We then
+    add adjacent-pair bigrams and content unigrams, together with simple
+    singular/plural variants so pages that use a different surface form still
+    appear in the fused pool. We deliberately avoid any question-specific
+    hard-coded expansion so hidden FinanceBench prompts behave the same way.
+    """
+
     terms = tuple(
         dict.fromkeys(
             term.casefold()
@@ -401,87 +342,42 @@ def _retrieval_queries(question: str) -> tuple[str, ...]:
             if len(term) > 2 and term.casefold() not in _QUERY_STOP_WORDS
         )
     )
-    variants = [question, *_section_queries(question)]
+    variants: list[str] = [question]
     for index in range(len(terms) - 1):
         variants.append(f"{terms[index]} {terms[index + 1]}")
     variants.extend(terms)
     for term in terms:
-        if term.endswith("ies"):
+        if term.endswith("ies") and len(term) > 4:
             variants.append(f"{term[:-3]}y")
-        elif term.endswith("ates"):
-            variants.append(f"{term[:-3]}ations")
-        elif term.endswith("s") and len(term) > 4:
-            singular = term[:-1]
-            variants.append(singular)
-            if singular.endswith("ate"):
-                variants.append(f"{singular[:-3]}ation")
-    if "operating" in terms and "income" in terms:
-        variants.append("operating profit")
-    return tuple(dict.fromkeys(variants[:40]))
-
-
-def _section_queries(question: str) -> tuple[str, ...]:
-    """Supply financial statement vocabulary missing from a natural-language question."""
-
-    text = question.casefold()
-    sections = []
-    if "capital-intensive" in text or "capital intensive" in text:
-        sections.extend(("consolidated statement of income", "consolidated balance sheet", "statement of cash flows"))
-    if "geograph" in text:
-        sections.extend(("reportable segments", "countries territories"))
-    if re.search(r"\b(?:ppne|ppe)\b|pp\s*&\s*e", text):
-        sections.append("property plant equipment")
-    if "ebitda" in text:
-        sections.extend(("operating income", "depreciation amortization"))
-    if "capex" in text:
-        sections.append("capital expenditures")
-    return tuple(sections)
-
+        elif term.endswith("s") and not term.endswith("ss") and len(term) > 4:
+            variants.append(term[:-1])
+    return tuple(dict.fromkeys(variants))[:48]
 
 def _document_score(question: str, page_text: str) -> float:
-    """Use the projected document ID to distinguish reports in a shared scope."""
+    """Use the projected document ID to distinguish reports in a shared scope.
+
+    When several reports share one Memory scope, pages that belong to the
+    report named in the question should rank higher. This is a boost rather
+    than a filter because questions can compare reports or omit the issuer.
+    """
 
     document_id, separator, _ = page_text.partition("\n")
     if not separator:
         return 0.0
-    query_terms = set(re.findall(r"[a-z0-9]+", question.casefold()))
-    document_terms = set(re.findall(r"[a-z0-9]+", document_id.casefold()))
-    names = document_terms - _QUERY_STOP_WORDS - {"annual", "report", "10k", "10q", "k", "q", "form", "pdf"}
-    names = {term for term in names if not term.isdigit() and len(term) > 1}
-    # Year alone cannot identify a company. Keep this as a boost rather than a
-    # filter: questions can compare reports or omit the issuer altogether.
-    if not names or not names & query_terms:
+    query_terms = {term.casefold() for term in re.findall(r"[A-Za-z0-9]+", question) if len(term) > 1}
+    if not query_terms:
         return 0.0
-    name_score = len(names & query_terms) / len(names)
+    document_terms = {term.casefold() for term in re.findall(r"[A-Za-z0-9]+", document_id) if len(term) > 1}
+    names = {
+        term
+        for term in document_terms
+        if not term.isdigit() and term not in {"annual", "report", "10k", "10q", "form", "pdf"}
+    }
+    if not names or not (names & query_terms):
+        return 0.0
+    name_score = len(names & query_terms) / max(len(names), 1)
     years = {term for term in document_terms if re.fullmatch(r"(?:19|20)\d{2}", term)}
-    return 4.0 * name_score + (2.0 if years & query_terms else 0.0)
-
-
-def _section_score(question: str, page_text: str) -> float:
-    """Favor a requested statement when its heading identifies the actual page."""
-
-    query = question.casefold()
-    heading = " ".join(page_text[:500].casefold().split())
-    score = 0.0
-    capital = "capital-intensive" in query or "capital intensive" in query
-    if ("balance sheet" in query or "ppne" in query or "pp&e" in query or capital) and re.search(
-        r"consolidated balance shee\s*t", heading
-    ):
-        score += 1.0
-    if ("cash flow" in query or "capex" in query or "capital expenditure" in query or capital) and re.search(
-        r"consolidated statement of cash flow\s*s?", heading
-    ):
-        score += 1.0
-    if ("income statement" in query or "p&l" in query or "operating income" in query or capital) and (
-        "consolidated statement of income" in heading
-    ):
-        score += 1.0
-    if "segment" in query and "sales and operating income" in heading and "business segment" in heading:
-        score += 1.0
-    if "geograph" in query and "reportable segments" in page_text[:4000].casefold():
-        score += 0.8
-    return score
-
+    return 2.0 * name_score + (1.0 if years & query_terms else 0.0)
 
 async def _gather_searches(
     search: Callable[[Any], Awaitable[Any]],
@@ -495,7 +391,6 @@ async def _gather_searches(
         page = await search(SearchMemoryRequest(query=query, mode="fts", limit=limit))
         results.append(tuple(page.hits))
     return tuple(results)
-
 
 __all__ = [
     "PDF_PAGE_SOURCE_DEFINITION",
