@@ -87,6 +87,19 @@ def normalize_text(value: str) -> str:
     return normalized
 
 
+def normalize_entry_text(value: str, *, kind: str, source_refs: Sequence[object]) -> str:
+    """Retain full captured PDF pages while bounding other Memory entries."""
+
+    if (
+        kind == "source-evidence"
+        and len(source_refs) == 1
+        and isinstance(source_refs[0], Mapping)
+        and source_refs[0].get("source_type") == "pdf-page"
+    ):
+        return _normalize_non_empty_string(value, "memory entry text")
+    return normalize_text(value)
+
+
 def normalize_query(value: str) -> str:
     """Normalize one transient retrieval query.
 
@@ -158,9 +171,10 @@ def entry_content_bytes(
 ) -> bytes:
     """Return canonical content bytes for an immutable entry version."""
 
+    normalized_kind = normalize_kind(kind)
     return canonical_json({
-        "kind": normalize_kind(kind),
-        "text": normalize_text(text),
+        "kind": normalized_kind,
+        "text": normalize_entry_text(text, kind=normalized_kind, source_refs=source_refs),
         "source_refs": normalize_refs(source_refs),
         "artifact_refs": normalize_refs(artifact_refs),
     })

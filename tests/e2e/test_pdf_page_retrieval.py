@@ -237,3 +237,38 @@ def test_evidence_recall_with_multiple_reports_years_and_more_than_twenty_distra
             assert hits / total >= 0.70
 
     asyncio.run(scenario())
+
+
+def test_complete_pdf_page_larger_than_memory_text_limit_survives_reopen(tmp_path):
+    async def scenario():
+        settings = BuiltinConfig(database=SQLiteConfig(url=f"sqlite+aiosqlite:///{tmp_path / 'large-page.db'}"))
+        registry = SourceDefinitionRegistry((PDF_PAGE_SOURCE_DEFINITION,))
+        page = parse_pdf_document(
+            PDFDocumentInput(document_id="REPORT_2022_10K", content=make_pdf(("Legal proceedings\n" + "body " * 1800,)))
+        )[0]
+        expected = f"{page.document_id}\n{page.text}".strip()
+        assert len(expected.encode("utf-8")) > 8192
+        source = await registry.resolve(page)
+        async with open_builtin_runtime(settings) as runtime:
+            scope = await runtime.scopes.create(
+                ScopeDraft(title="Report", summary="Evidence", idempotency_key="report")
+            )
+            await runtime.ingestion.register(manifest_for_definition(PDF_PAGE_SOURCE_DEFINITION))
+            await runtime.ingestion.submit(
+                SubmitSourceObservation(
+                    scope_id=scope.scope_id,
+                    observation=project_source_for_transport(registry, source),
+                )
+            )
+        async with open_builtin_runtime(settings, candidate_pipeline=_FullPageEvidence()) as runtime:
+            memory = runtime.memory.for_scope(scope.scope_id)
+            assert (await memory.flush()).processed
+        async with open_builtin_runtime(settings) as runtime:
+            memory = runtime.memory.for_scope(scope.scope_id)
+            (citation,) = await search_pdf_pages(memory, "Legal proceedings", limit=1)
+            entry = (await memory.get(GetMemoryEntryRequest(citation=citation))).entry
+            assert entry.text == expected
+            assert len(entry.sources) == 1
+            assert entry.sources[0].source_id == source.name
+
+    asyncio.run(scenario())

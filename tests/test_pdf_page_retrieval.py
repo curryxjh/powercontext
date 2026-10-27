@@ -121,6 +121,91 @@ async def test_geography_question_can_retrieve_reportable_segments() -> None:
     assert [citation.entry_id for citation in citations] == ["page-4"]
 
 
+@pytest.mark.asyncio
+async def test_cash_flow_statement_plural_heading_is_retrieved() -> None:
+    class Memory(_PageMemory):
+        async def search(self, request):
+            if request.query == "consolidated statements of cash flows":
+                return SimpleNamespace(hits=(_page(26, "REPORT_2022_10K\nConsolidated Statements of Cash Flows"),))
+            if request.query.startswith("What is the dividend payout ratio"):
+                return SimpleNamespace(
+                    hits=tuple(_page(i, "REPORT_2022_10K\nOther financial data") for i in range(1, 26))
+                )
+            return SimpleNamespace(hits=())
+
+    citations = await search_pdf_pages(
+        Memory(),
+        "What is the dividend payout ratio from the cash flow statement and the income statement?",
+        limit=20,
+    )
+
+    assert citations[0].entry_id == "page-26"
+
+
+@pytest.mark.parametrize(
+    ("question", "section", "heading"),
+    [
+        ("Is the quick ratio healthy?", "consolidated balance sheets", "Consolidated Balance Sheets"),
+        ("What is the gross margin?", "consolidated statements of operations", "Consolidated Statements of Operations"),
+        (
+            "Has the operating margin improved?",
+            "consolidated statements of operations",
+            "Consolidated Statements of Operations",
+        ),
+        (
+            "What is the effective tax rate?",
+            "consolidated statements of operations",
+            "Consolidated Statements of Operations",
+        ),
+        ("What was net income in 2021?", "consolidated statements of income", "Consolidated Statements of Income"),
+        (
+            "What is the quantity of restructuring costs directly outlined in the income statements for FY2022?",
+            "restructuring and impairment charges",
+            "Note 3 Restructuring and Impairment Charges",
+        ),
+        ("Which product categories drive revenue?", "business segment data", "Summary of Business Segment Data"),
+        ("Which geographies does the company operate in?", "geographic operations", "Geographic Operations"),
+        ("What changed the operating margin?", "results of operations", "Results of Operations"),
+        (
+            "Which segment had lower growth?",
+            "sales and operating income",
+            "Sales and Operating Income by Business Segment",
+        ),
+        (
+            "What drove the gross margin change?",
+            "analysis of consolidated earnings",
+            "Analysis of Consolidated Earnings",
+        ),
+        ("What is the inventory turnover?", "consolidated balance sheets", "Consolidated Balance Sheets"),
+        (
+            "What is the inventory turnover?",
+            "consolidated statements of earnings",
+            "Consolidated Statements of Earnings",
+        ),
+        (
+            "Is free cashflow conversion improving?",
+            "consolidated statements of cash flows",
+            "Consolidated Statements of Cash Flows",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_financial_question_recalls_its_statement_page(question: str, section: str, heading: str) -> None:
+    class Memory(_PageMemory):
+        async def search(self, request):
+            if section in request.query:
+                return SimpleNamespace(hits=(_page(26, f"REPORT_2022_10K\n{heading}\n2022 2021"),))
+            if request.query == question:
+                return SimpleNamespace(
+                    hits=tuple(_page(i, "REPORT_2022_10K\nUnrelated discussion") for i in range(1, 26))
+                )
+            return SimpleNamespace(hits=())
+
+    citations = await search_pdf_pages(Memory(), question, limit=20)
+
+    assert citations[0].entry_id == "page-26"
+
+
 @pytest.mark.parametrize("company", ["ACME", "3M", "NORTH-WEST"])
 @pytest.mark.parametrize("distractor", ["OTHER_2023_10K", "{company}_2021_10K"])
 @pytest.mark.asyncio
@@ -154,3 +239,30 @@ async def test_financial_question_retains_margin_as_retrieval_evidence():
 
     citations = await search_pdf_pages(Memory(), "What was the gross margin?")
     assert [citation.entry_id for citation in citations] == ["page-1"]
+
+
+@pytest.mark.asyncio
+async def test_legal_proceedings_heading_promotes_the_exact_page() -> None:
+    class Memory(_PageMemory):
+        async def search(self, request):
+            del request
+            return SimpleNamespace(
+                hits=(
+                    *(_page(i, "REPORT_2022_10K\nTable of contents\nLegal proceedings") for i in range(1, 26)),
+                    _page(
+                        26,
+                        "REPORT_2022_10K\nTable of Contents\n"
+                        + ("Item 2. Properties.\n" * 40)
+                        + "Item 3. Legal Proceedings\nThe company is involved in litigation.",
+                    ),
+                )
+            )
+
+    citations = await search_pdf_pages(
+        Memory(),
+        "Has the company reported any materially important ongoing legal battles?",
+        limit=20,
+    )
+
+    assert len(citations) == 20
+    assert citations[0].entry_id == "page-26"
