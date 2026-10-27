@@ -306,7 +306,11 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
             contribution = query_weight / (20 + rank)
             previous = ranked.get(key)
             if previous is None:
-                ranked[key] = (citation, contribution, query_index * query_limit + rank)
+                ranked[key] = (
+                    citation,
+                    contribution + _section_score(question, hit.text),
+                    query_index * query_limit + rank,
+                )
             else:
                 ranked[key] = (previous[0], previous[1] + contribution, previous[2])
 
@@ -322,7 +326,7 @@ def _retrieval_queries(question: str) -> tuple[str, ...]:
             if len(term) > 2 and term.casefold() not in _QUERY_STOP_WORDS
         )
     )
-    variants = [question]
+    variants = [question, *_section_queries(question)]
     for index in range(len(terms) - 1):
         variants.append(f"{terms[index]} {terms[index + 1]}")
     variants.extend(terms)
@@ -338,7 +342,45 @@ def _retrieval_queries(question: str) -> tuple[str, ...]:
                 variants.append(f"{singular[:-3]}ation")
     if "operating" in terms and "income" in terms:
         variants.append("operating profit")
-    return tuple(dict.fromkeys(variants[:32]))
+    return tuple(dict.fromkeys(variants[:40]))
+
+
+def _section_queries(question: str) -> tuple[str, ...]:
+    """Supply financial statement vocabulary missing from a natural-language question."""
+
+    text = question.casefold()
+    sections = []
+    if "capital-intensive" in text or "capital intensive" in text:
+        sections.extend(("consolidated statement of income", "consolidated balance sheet", "statement of cash flows"))
+    if "geograph" in text:
+        sections.extend(("reportable segments", "countries territories"))
+    return tuple(sections)
+
+
+def _section_score(question: str, page_text: str) -> float:
+    """Favor a requested statement when its heading identifies the actual page."""
+
+    query = question.casefold()
+    heading = " ".join(page_text[:500].casefold().split())
+    score = 0.0
+    capital = "capital-intensive" in query or "capital intensive" in query
+    if ("balance sheet" in query or "ppne" in query or "pp&e" in query or capital) and re.search(
+        r"consolidated balance shee\s*t", heading
+    ):
+        score += 1.0
+    if ("cash flow" in query or "capex" in query or "capital expenditure" in query or capital) and re.search(
+        r"consolidated statement of cash flow\s*s?", heading
+    ):
+        score += 1.0
+    if ("income statement" in query or "p&l" in query or "operating income" in query or capital) and (
+        "consolidated statement of income" in heading
+    ):
+        score += 1.0
+    if "segment" in query and "sales and operating income" in heading and "business segment" in heading:
+        score += 1.0
+    if "geograph" in query and "reportable segments" in page_text[:4000].casefold():
+        score += 0.8
+    return score
 
 
 async def _gather_searches(

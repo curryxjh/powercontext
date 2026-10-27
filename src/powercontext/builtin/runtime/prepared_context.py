@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
@@ -410,6 +411,8 @@ class PreparedContextBuilder:
                     score = _evidence_score(text, query_terms)
                     if score <= 0:
                         continue
+                    # Retrieval rank is a prior; a strong query match can still outrank it.
+                    score += 6 * (len(group.hits) - candidate_rank - 1) + 2 * start / len(hit.text)
                     candidates.append((score, hit_rank, candidate_rank, start, end, address, hit.text))
 
         candidates.sort(key=lambda value: (-value[0], value[1], value[2], value[3]))
@@ -808,6 +811,11 @@ def _rendered_bytes(entries: Sequence[_PreparedContextEntry]) -> int:
 
 
 _EVIDENCE_TOKEN_RE = re.compile(r"[a-z0-9]+|[\u3400-\u9fff]+", re.IGNORECASE)
+_EVIDENCE_STOP_WORDS = frozenset(
+    "a an and are as at be been being but by can could did do does for from had has have how if in into is it its "  # noqa: SIM905
+    "may more of on or our than that the their them there these this those to was were what when where which while "
+    "who why with within would will we show shown used using use results study studies effect effects associated".split()
+)
 
 
 def _evidence_terms(query: str) -> tuple[str, ...]:
@@ -825,8 +833,6 @@ def _evidence_spans(text: str) -> tuple[tuple[int, int], ...]:
         right = end
         while left < right and text[left].isspace():
             left += 1
-        while right > left and text[right - 1].isspace():
-            right -= 1
         if left < right:
             spans.append((left, right))
         start = end
@@ -842,15 +848,30 @@ def _evidence_spans(text: str) -> tuple[tuple[int, int], ...]:
     return tuple(spans)
 
 
-def _evidence_score(text: str, query_terms: Sequence[str]) -> int:
-    if not query_terms:
+def _evidence_stem(term: str) -> str:
+    if len(term) > 5 and term.endswith("ies"):
+        return f"{term[:-3]}y"
+    if len(term) > 5 and term.endswith("ing"):
+        return term[:-3]
+    if len(term) > 5 and term.endswith("ed"):
+        return term[:-2]
+    if len(term) > 4 and term.endswith("s") and not term.endswith("ss"):
+        return term[:-1]
+    return term
+
+
+def _evidence_score(text: str, query_terms: Sequence[str]) -> float:
+    meaningful = {_evidence_stem(term) for term in query_terms if len(term) > 2 and term not in _EVIDENCE_STOP_WORDS}
+    if not meaningful:
+        meaningful = {_evidence_stem(term) for term in query_terms}
+    if not meaningful:
         return 0
-    tokens = _EVIDENCE_TOKEN_RE.findall(text.casefold())
-    counts = {term: tokens.count(term) for term in query_terms}
-    matched = sum(counts.values())
-    distinct = sum(count > 0 for count in counts.values())
-    phrase_bonus = 3 if " ".join(query_terms) in " ".join(tokens) else 0
-    return matched + distinct + phrase_bonus
+    tokens = {_evidence_stem(term.casefold()) for term in _EVIDENCE_TOKEN_RE.findall(text)}
+    matched = meaningful & tokens
+    if not matched:
+        return 0
+    specificity = sum(1 + math.log1p(len(term)) for term in matched)
+    return specificity * (1 + len(matched) / len(meaningful))
 
 
 def _render_evidence(fragments: Sequence[PreparedContextFragment]) -> str:

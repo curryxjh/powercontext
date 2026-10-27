@@ -679,6 +679,45 @@ def test_entry_limit_truncation_is_not_counted_as_an_omission() -> None:
     assert build.omissions == PreparedContextOmissions(truncated_items=0, dropped_items=0)
 
 
+def test_evidence_selection_favors_distinct_query_terms_over_repeated_generic_words() -> None:
+    distracting = "Lung tissue in the lung tissue is tissue in the lung tissue with lung tissue and lung tissue."
+    evidence = "The axolotl kinase induces resistance in lung tissue."
+    build = PreparedContextBuilder().build_scopes_result(
+        current_scope_id="current",
+        request=PrepareContextRequest(
+            query="Which axolotl kinase induces resistance in lung tissue?",
+            max_bytes=800,
+            evidence_selection=True,
+        ),
+        memory_candidates=(
+            PreparedMemoryCandidates(
+                scope_id="current",
+                memory_ref=MEMORY_REF,
+                hits=(_hit("noise", distracting), _hit("evidence", evidence)),
+            ),
+        ),
+    )
+
+    assert build.fragments
+    assert build.fragments[0].address.entry_id == "evidence"
+    assert build.fragments[0].text == evidence
+
+
+def test_evidence_selection_keeps_literal_trailing_space_in_a_selected_sentence() -> None:
+    text = "The axolotl kinase induces resistance.   A different observation follows."
+    build = PreparedContextBuilder().build_scopes_result(
+        current_scope_id="current",
+        request=PrepareContextRequest(query="axolotl kinase resistance", max_bytes=800, evidence_selection=True),
+        memory_candidates=(
+            PreparedMemoryCandidates(scope_id="current", memory_ref=MEMORY_REF, hits=(_hit("evidence", text),)),
+        ),
+    )
+
+    assert build.fragments
+    assert build.fragments[0].text == "The axolotl kinase induces resistance.   "
+    assert build.fragments[0].text == text[build.fragments[0].start : build.fragments[0].end]
+
+
 def test_assembly_counts_a_dropped_item_and_a_truncated_item() -> None:
     assembly = ContextAssembly.model_validate({"sections": [{"family": "memory", "limit": 8}]})
     dropped = PreparedContextBuilder().build_scopes_result(
