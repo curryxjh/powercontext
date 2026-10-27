@@ -27,6 +27,7 @@ registry = SourceDefinitionRegistry((PDF_PAGE_SOURCE_DEFINITION,))
 解析返回全部物理页组成的 tuple，保持原顺序，页码从一开始。空白页保留，文本为空。
 每页携带完整输入字节的 SHA-256 摘要，包括元数据及权限信息。支持以空密码直接读取的权限受限文件。
 空文件、非 PDF、无法解密的 PDF 或任意页面的解析失败都抛出 `ValueError`，不会返回部分页面。
+文本流在提取前检查压缩完整性；正文和嵌套 Form 的损坏不能作为空白页静默返回。
 文档 ID 不能是空串或纯空白；有意义的首尾空格及中文会被保留。物理页码必须是正整数。
 
 对每页执行 `await registry.resolve(page)`，再通过 `project_source_for_transport(registry, source)`
@@ -50,7 +51,8 @@ for citation in citations:
 ```
 
 检索只使用传入的 scoped Memory 的公开 search/get API。有限的词法查询扩展覆盖常见财务缩写，
-财务报表标题也参与排序。结果是来自真实 Memory 的精确 citation，最多包含 `limit` 个不同的 PDF Source 身份。
+财务报表标题也参与排序；投影首行的文档 ID 与问题中的公司、年份匹配时加权，
+减少混合文档集合中其他公司或年份的相似报表挤占结果的情况。该加权不作为硬过滤，允许跨报告比较。结果是来自真实 Memory 的精确 citation，最多包含 `limit` 个不同的 PDF Source 身份。
 没有 PDF 来源的 entry 和同时组合多个 PDF 页面的 entry 不作为精确页面返回；同一页的重复 entry 只占一个结果名额。
 不同文档修订具有独立的页面身份。`limit=0` 不访问 Memory，负数或非整数上限、空白问题均被拒绝。
 

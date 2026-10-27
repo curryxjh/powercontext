@@ -151,3 +151,89 @@ def test_pdf_pages_persist_across_restarts_and_search_returns_exact_distinct_pag
             assert await search_pdf_pages(runtime.memory.for_scope(outside.scope_id), "balance sheet") == ()
 
     asyncio.run(scenario())
+
+
+class _FullPageEvidence:
+    async def extract(self, request, /):
+        return tuple(
+            MemoryEntryInput(
+                kind="source-evidence",
+                text=TextEvidence.model_validate(source.projection(TEXT_EVIDENCE_PROJECTION_KEY)).content,
+                sources=(source,),
+            )
+            for source in request.sources
+        )
+
+
+def test_evidence_recall_with_multiple_reports_years_and_more_than_twenty_distractors(tmp_path):
+    """Known synthetic pages exercise recall, not merely citation validity."""
+
+    async def scenario():
+        settings = BuiltinConfig(database=SQLiteConfig(url=f"sqlite+aiosqlite:///{tmp_path / 'recall.db'}"))
+        registry = SourceDefinitionRegistry((PDF_PAGE_SOURCE_DEFINITION,))
+        relevant = (
+            "Assets\nProperty plant equipment net 120\n2024 2023",
+            "Profitability\nGross margin 35.7 percent\n2024 2023",
+            "Consolidated Statements of Cash Flows\nCapital expenditures 450\n2024 2023",
+            "Reportable segments\nNorth America Europe Asia\n2024 2023",
+        )
+        distractors = tuple(
+            f"Consolidated Balance Sheet\nProperty plant equipment 900\n"
+            f"Gross margin 99 percent\nCapital expenditures 800\nReportable segments\nNote {i}"
+            for i in range(28)
+        )
+        reports = {
+            "ACME_2024_10K": (*relevant, "", *tuple(f"Personnel policy {i}" for i in range(24))),
+            "ACME_2021_10K": distractors,
+            "OTHER_2024_10K": distractors,
+            "THIRD_2024_10K": distractors,
+            "FOURTH_2023_10K": distractors,
+        }
+        locations = {}
+        async with open_builtin_runtime(settings) as runtime:
+            assert runtime.scopes is not None
+            scope = await runtime.scopes.create(ScopeDraft(title="Reports", summary="Recall", idempotency_key="recall"))
+            await runtime.ingestion.register(manifest_for_definition(PDF_PAGE_SOURCE_DEFINITION))
+            for document, texts in reports.items():
+                pages = parse_pdf_document(PDFDocumentInput(document_id=document, content=make_pdf(texts)))
+                assert len(pages) == len(texts)
+                for page in pages:
+                    source = await registry.resolve(page)
+                    locations[source.name] = (document, page.page_number)
+                    await runtime.ingestion.submit(
+                        SubmitSourceObservation(
+                            scope_id=scope.scope_id, observation=project_source_for_transport(registry, source)
+                        )
+                    )
+        async with open_builtin_runtime(settings, candidate_pipeline=_FullPageEvidence()) as runtime:
+            memory = runtime.memory.for_scope(scope.scope_id)
+            for _ in range(len(locations) + 1):
+                if not (await memory.flush()).processed:
+                    break
+            else:
+                raise AssertionError("PDF processing did not drain")  # noqa: TRY003
+        async with open_builtin_runtime(settings) as runtime:
+            memory = runtime.memory.for_scope(scope.scope_id)
+            questions = (
+                ("What was ACME's net PPNE in 2024?", {1}),
+                ("What was ACME's gross margin in 2024?", {2}),
+                ("How much did ACME spend on capex in 2024?", {3}),
+                ("In which geographies did ACME operate in 2024?", {4}),
+                ("Compare ACME's gross margin and property plant equipment in 2024.", {1, 2}),
+            )
+            hits = total = 0
+            for question, expected_pages in questions:
+                citations = await search_pdf_pages(memory, question, limit=20)
+                found = set()
+                for citation in citations:
+                    record = await memory.get(GetMemoryEntryRequest(citation=citation))
+                    assert len(record.entry.sources) == 1
+                    found.add(locations[record.entry.sources[0].source_id])
+                assert len(found) == len(citations) <= 20
+                expected = {("ACME_2024_10K", page) for page in expected_pages}
+                hits += len(found & expected)
+                total += len(expected)
+                assert expected <= found, (question, found)
+            assert hits / total >= 0.70
+
+    asyncio.run(scenario())

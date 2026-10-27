@@ -28,7 +28,8 @@ registry = SourceDefinitionRegistry((PDF_PAGE_SOURCE_DEFINITION,))
 Parsing returns a tuple of all physical pages, in order, numbered from one. Blank pages remain in the tuple with empty
 text. Each page carries the SHA-256 digest of the complete input bytes, including metadata and permissions. Documents
 readable with an empty password are supported. Empty files, invalid PDFs, inaccessible encrypted PDFs, and failures on
-any page raise `ValueError`; no partial page tuple is returned. Document IDs must be nonblank; significant whitespace
+any page raise `ValueError`; no partial page tuple is returned. Text-bearing streams are checked before extraction,
+including compressed data integrity and nested Form syntax, so corruption cannot silently become blank text. Document IDs must be nonblank; significant whitespace
 and Unicode are preserved. Physical page numbers must be positive integers.
 
 For each page, resolve the Source with `await registry.resolve(page)` and create an observation with
@@ -52,7 +53,9 @@ for citation in citations:
 ```
 
 Search uses only the supplied scoped Memory's public search/get APIs. Bounded lexical query expansion includes common
-financial abbreviations, and statement headings contribute to ranking. Results are exact citations obtained from Memory,
+financial abbreviations, and statement headings contribute to ranking. Matches between the projected document ID
+and the question's issuer/year also contribute, so similar statements from other reports do not dominate solely by
+heading. This is a ranking boost rather than a hard filter, allowing comparisons across reports. Results are exact citations obtained from Memory,
 with at most `limit` distinct PDF Source identities. Entries without a PDF Source or combining several PDF pages are
 excluded. Repeated entries for the same page consume one result slot. Different document revisions retain distinct page
 identities. Zero limit performs no Memory access; negative or noninteger limits and blank questions are rejected.

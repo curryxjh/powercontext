@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import zlib
 from collections.abc import Awaitable, Callable
 from io import BytesIO
 from typing import TYPE_CHECKING, Any
@@ -62,7 +63,6 @@ _QUERY_STOP_WORDS = frozenset({
     "analyst",
     "calculate",
     "directly",
-    "ebitda",
     "explicitly",
     "for",
     "from",
@@ -74,11 +74,9 @@ _QUERY_STOP_WORDS = frozenset({
     "in",
     "important",
     "into",
-    "investment",
     "is",
     "it",
     "may",
-    "margin",
     "more",
     "not",
     "of",
@@ -184,13 +182,77 @@ def parse_pdf_document(value: PDFDocumentInput) -> tuple[PDFPageInput, ...]:
                 document_id=value.document_id,
                 document_sha256=document_sha256,
                 page_number=page_number,
-                text=page.extract_text() or "",
+                text=_extract_page_text(page),
             )
             for page_number, page in enumerate(reader.pages, start=1)
         )
     except Exception as error:
         raise ValueError("unable to parse PDF document") from error  # noqa: TRY003
     return pages
+
+
+def _extract_page_text(page: Any) -> str:
+    # pypdf's strict reader still recovers broken Flate streams as empty or
+    # partial text. Validate text-bearing streams before trusting extraction.
+    _validate_text_object(page, set())
+    return page.extract_text() or ""
+
+
+def _validate_text_object(value: Any, visited: set[int]) -> None:
+    from pypdf.generic import ArrayObject, DictionaryObject, NullObject, StreamObject
+
+    value = value.get_object()
+    if isinstance(value, NullObject):
+        return
+    if isinstance(value, ArrayObject):
+        for item in value:
+            _validate_text_object(item, visited)
+        return
+    if not isinstance(value, StreamObject) and not (
+        isinstance(value, DictionaryObject) and value.get("/Type") == "/Page"
+    ):
+        raise TypeError("invalid PDF content stream")  # noqa: TRY003
+    if id(value) in visited:
+        return
+    visited.add(id(value))
+    if isinstance(value, StreamObject):
+        _validate_text_stream(value)
+    if "/Contents" in value:
+        _validate_text_object(value["/Contents"], visited)
+    resources = value.get("/Resources", DictionaryObject()).get_object()
+    objects = resources.get("/XObject", DictionaryObject()).get_object()
+    for reference in objects.values():
+        obj = reference.get_object()
+        if obj.get("/Subtype") == "/Form":
+            _validate_text_object(obj, visited)
+
+
+def _validate_text_stream(stream: Any) -> None:
+    from pypdf.filters import decode_stream_data
+    from pypdf.generic import ArrayObject, ContentStream, DictionaryObject, EncodedStreamObject, NameObject, NullObject
+
+    filters = stream.get("/Filter", ArrayObject()).get_object()
+    if not isinstance(filters, ArrayObject):
+        filters = [filters]
+    params = stream.get("/DecodeParms", ArrayObject()).get_object()
+    if not isinstance(params, ArrayObject):
+        params = [params]
+    # Raw encoded bytes are needed to check the checksum/end marker before
+    # pypdf's recovery decoder discards this evidence (pypdf is version-pinned).
+    data = stream._data
+    for index, filter_name in enumerate(filters):
+        if filter_name in ("/FlateDecode", "/Fl"):
+            zlib.decompress(data)
+        layer = EncodedStreamObject()
+        layer._data = data
+        layer[NameObject("/Filter")] = filter_name
+        parameter = params[index] if index < len(params) else DictionaryObject()
+        layer[NameObject("/DecodeParms")] = DictionaryObject() if isinstance(parameter, NullObject) else parameter
+        data = decode_stream_data(layer)
+    # Form extraction can swallow tokenization errors; force parsing here.
+    if stream.get("/Subtype") == "/Form":
+        reference = getattr(stream, "indirect_reference", None)
+        _ = ContentStream(stream, reference.pdf if reference is not None else None).operations
 
 
 def _ensure_pdf_readable(reader: Any) -> None:
@@ -306,7 +368,7 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
             if previous is None:
                 ranked[key] = (
                     citation,
-                    contribution + _section_score(question, hit.text),
+                    contribution + _section_score(question, hit.text) + _document_score(question, hit.text),
                     query_index * query_limit + rank,
                 )
             else:
@@ -374,6 +436,25 @@ def _section_queries(question: str) -> tuple[str, ...]:
     if "capex" in text:
         sections.append("capital expenditures")
     return tuple(sections)
+
+
+def _document_score(question: str, page_text: str) -> float:
+    """Use the projected document ID to distinguish reports in a shared scope."""
+
+    document_id, separator, _ = page_text.partition("\n")
+    if not separator:
+        return 0.0
+    query_terms = set(re.findall(r"[a-z0-9]+", question.casefold()))
+    document_terms = set(re.findall(r"[a-z0-9]+", document_id.casefold()))
+    names = document_terms - _QUERY_STOP_WORDS - {"annual", "report", "10k", "10q", "k", "q", "form", "pdf"}
+    names = {term for term in names if not term.isdigit() and len(term) > 1}
+    # Year alone cannot identify a company. Keep this as a boost rather than a
+    # filter: questions can compare reports or omit the issuer altogether.
+    if not names or not names & query_terms:
+        return 0.0
+    name_score = len(names & query_terms) / len(names)
+    years = {term for term in document_terms if re.fullmatch(r"(?:19|20)\d{2}", term)}
+    return 4.0 * name_score + (2.0 if years & query_terms else 0.0)
 
 
 def _section_score(question: str, page_text: str) -> float:

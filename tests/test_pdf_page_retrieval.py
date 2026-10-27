@@ -119,3 +119,38 @@ async def test_geography_question_can_retrieve_reportable_segments() -> None:
     citations = await search_pdf_pages(Memory(), "What geographies does the company operate in?")
 
     assert [citation.entry_id for citation in citations] == ["page-4"]
+
+
+@pytest.mark.parametrize("company", ["ACME", "3M", "NORTH-WEST"])
+@pytest.mark.parametrize("distractor", ["OTHER_2023_10K", "{company}_2021_10K"])
+@pytest.mark.asyncio
+async def test_question_document_identity_outweighs_other_reports_statement_headings(company, distractor):
+    class Memory(_PageMemory):
+        async def search(self, request):
+            return SimpleNamespace(
+                hits=(
+                    *(
+                        _page(
+                            i,
+                            f"{distractor.format(company=company)}\nConsolidated Balance Sheet\nProperty plant equipment 900",
+                        )
+                        for i in range(1, 26)
+                    ),
+                    _page(26, f"{company}_2024_10K\nAssets\nProperty plant equipment net 120"),
+                )
+            )
+
+    citations = await search_pdf_pages(Memory(), f"What is {company}'s net PPNE for 2024?", limit=20)
+    assert citations[0].entry_id == "page-26"
+
+
+@pytest.mark.asyncio
+async def test_financial_question_retains_margin_as_retrieval_evidence():
+    class Memory(_PageMemory):
+        async def search(self, request):
+            if request.query == "margin":
+                return SimpleNamespace(hits=(_page(1, "Report\nGross margin was 35 percent"),))
+            return SimpleNamespace(hits=())
+
+    citations = await search_pdf_pages(Memory(), "What was the gross margin?")
+    assert [citation.entry_id for citation in citations] == ["page-1"]

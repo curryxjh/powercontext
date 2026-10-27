@@ -19,6 +19,7 @@ import hashlib
 import re
 from collections import Counter
 from io import BytesIO
+from typing import cast
 
 import pytest
 from pydantic import ValidationError
@@ -213,3 +214,108 @@ def test_physical_page_number_requires_a_positive_integer(number):
         PDFPageInput(document_id="report", document_sha256="a" * 64, page_number=number, text="")
     with pytest.raises(ValueError):
         pdf_page_source_id("report", "a" * 64, number)
+
+
+@pytest.mark.parametrize("damage", ["invalid", "truncated", "checksum"])
+@pytest.mark.parametrize("in_form", [False, True])
+def test_damaged_compressed_text_is_not_silently_accepted_as_blank(damage, in_form):
+    import zlib
+
+    from pypdf.generic import EncodedStreamObject
+
+    writer = PdfWriter(clone_from=BytesIO(make_pdf(("Valid first page", "Last page"))))
+    encoded = zlib.compress(b"BT /F1 10 Tf (Revenue 123456) Tj ET")
+    if damage == "invalid":
+        encoded = b"invalid compressed text"
+    elif damage == "truncated":
+        encoded = encoded[:-4]
+    else:
+        encoded = encoded[:-1] + bytes([encoded[-1] ^ 0xFF])
+    stream = EncodedStreamObject()
+    stream[NameObject("/Filter")] = NameObject("/FlateDecode")
+    stream._data = encoded
+    if in_form:
+        stream[NameObject("/Subtype")] = NameObject("/Form")
+        cast(DictionaryObject, writer.pages[-1]["/Resources"])[NameObject("/XObject")] = DictionaryObject({
+            NameObject("/Fm"): writer._add_object(stream),
+        })
+        content = DecodedStreamObject()
+        content.set_data(b"q /Fm Do Q")
+        writer.pages[-1][NameObject("/Contents")] = writer._add_object(content)
+    else:
+        writer.pages[-1][NameObject("/Contents")] = writer._add_object(stream)
+    output = BytesIO()
+    writer.write(output)
+    with pytest.raises(ValueError):
+        parse_pdf_document(PDFDocumentInput(document_id="compressed", content=output.getvalue()))
+
+
+@pytest.mark.parametrize("chained", [False, True])
+def test_valid_compressed_text_with_optional_ascii85_filter_preserves_every_term(chained):
+    import base64
+    import zlib
+
+    from pypdf.generic import ArrayObject, EncodedStreamObject
+
+    writer = PdfWriter(clone_from=BytesIO(make_pdf(("Quarterly margin 35.7 percent", ""))))
+    stream = EncodedStreamObject()
+    encoded = zlib.compress(cast(DecodedStreamObject, writer.pages[0]["/Contents"]).get_data())
+    if chained:
+        encoded = base64.a85encode(encoded) + b"~>"
+        stream[NameObject("/Filter")] = ArrayObject([NameObject("/ASCII85Decode"), NameObject("/FlateDecode")])
+    else:
+        stream[NameObject("/Filter")] = NameObject("/FlateDecode")
+    stream._data = encoded
+    writer.pages[0][NameObject("/Contents")] = writer._add_object(stream)
+    output = BytesIO()
+    writer.write(output)
+    pages = parse_pdf_document(PDFDocumentInput(document_id="valid-compressed", content=output.getvalue()))
+    assert pages[0].text.strip() == "Quarterly margin 35.7 percent"
+    assert pages[1].text == ""
+
+
+def test_malformed_uncompressed_form_cannot_disappear_from_page_text():
+    writer = PdfWriter(clone_from=BytesIO(make_pdf(("Valid first page", "Last page"))))
+    form = DecodedStreamObject()
+    form.set_data(b"BT /F1 10 Tf (unterminated text")
+    form[NameObject("/Subtype")] = NameObject("/Form")
+    cast(DictionaryObject, writer.pages[-1]["/Resources"])[NameObject("/XObject")] = DictionaryObject({
+        NameObject("/Fm"): writer._add_object(form),
+    })
+    content = DecodedStreamObject()
+    content.set_data(b"q /Fm Do Q")
+    writer.pages[-1][NameObject("/Contents")] = writer._add_object(content)
+    output = BytesIO()
+    writer.write(output)
+    with pytest.raises(ValueError):
+        parse_pdf_document(PDFDocumentInput(document_id="malformed-form", content=output.getvalue()))
+
+
+def test_valid_form_text_and_array_contents_are_not_lost():
+    from pypdf.generic import ArrayObject
+
+    writer = PdfWriter(clone_from=BytesIO(make_pdf(("Base revenue 100",))))
+    page = writer.pages[0]
+    form = DecodedStreamObject()
+    form.set_data(b"BT /F1 10 Tf 10 700 Td (Nested profit 25) Tj ET")
+    form[NameObject("/Subtype")] = NameObject("/Form")
+    form[NameObject("/Resources")] = DictionaryObject({
+        NameObject("/Font"): cast(DictionaryObject, page["/Resources"])["/Font"]
+    })
+    cast(DictionaryObject, page["/Resources"])[NameObject("/XObject")] = DictionaryObject({
+        NameObject("/Fm"): writer._add_object(form)
+    })
+    extra = DecodedStreamObject()
+    extra.set_data(b"q /Fm Do Q")
+    page[NameObject("/Contents")] = ArrayObject([page["/Contents"], writer._add_object(extra)])
+    output = BytesIO()
+    writer.write(output)
+    parsed = parse_pdf_document(PDFDocumentInput(document_id="forms", content=output.getvalue()))
+    assert Counter(re.findall(r"[a-z]+|\d+", parsed[0].text.lower())) == Counter([
+        "base",
+        "revenue",
+        "100",
+        "nested",
+        "profit",
+        "25",
+    ])
