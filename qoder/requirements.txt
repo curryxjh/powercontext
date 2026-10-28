@@ -1,0 +1,5 @@
+# WenGu runtime. Python 3.11+ recommended.
+# powercontext 1.2.0 is the version whose embedded runtime API this app uses.
+fastapi==0.162.0
+uvicorn[standard]==0.54.0
+powercontext[builtin]==1.2.0

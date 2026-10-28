@@ -1,0 +1,19 @@
+WenGu / PowerContext verification against http://127.0.0.1:8010
+
+PASS  server         app 1.0.0
+PASS  powercontext   version 1.2.0
+PASS  learner        demo (1 scope(s))
+PASS  scope          scp_61gy6ejgma0j06wjczhzdy99mq
+PASS  knowledge      11 cards
+PASS  review replay  23 reviews
+PASS  memory entries 44 total · rev 16 · kinds {'knowledge': 12, 'review': 23, 'session': 5, 'profile': 1, 'struggle': 3}
+PASS  sources captured 12 linked card(s)
+PASS  chinese FTS    "卡点" matched 5 memories
+PASS  model requests 0 (offline, no API key)
+PASS  sources        3 source(s)
+PASS  context.prepare ready · 6 items
+PASS  citations      6/6 items cite entries
+PASS  revision history 1 revision(s) recorded
+PASS  web app        index served
+
+Result: 15/15 checks passed

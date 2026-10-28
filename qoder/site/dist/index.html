@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>温故 WenGu — 用 PowerContext 做学习接力</title>
+    <meta
+      name="description"
+      content="温故是一个离线优先的学习接力教练：把画像、卡片、复习、卡点与会话写成 PowerContext 记忆，下一次打开直接接上。0 次模型调用，无第二业务数据库。"
+    />
+    <meta name="theme-color" content="#f6f1e7" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="温故 WenGu — 用 PowerContext 做学习接力" />
+    <meta
+      property="og:description"
+      content="学过的东西，不该每次重新开始。离线优先、0 次模型调用，所有学习状态可检索、可修订、可追溯。"
+    />
+    <meta property="og:image" content="./assets/home.png" />
+    <link rel="icon" href="./assets/logo.svg" type="image/svg+xml" />
+    <script>document.documentElement.classList.add('js');</script>
+    <link rel="stylesheet" href="./styles.css" />
+    <script defer src="./script.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">跳到主要内容</a>
+
+    <header class="site-header" data-header>
+      <div class="shell header-inner">
+        <a class="brand" href="#top" aria-label="温故 WenGu 首页">
+          <img src="./assets/logo.svg" alt="" width="38" height="38" />
+          <span class="brand-text">
+            <strong>温故</strong>
+            <span>WENGU</span>
+          </span>
+        </a>
+
+        <button class="menu-button" type="button" aria-expanded="false" aria-controls="site-nav" data-menu>
+          <span class="menu-line"></span>
+          <span class="menu-line"></span>
+          <span class="menu-line"></span>
+          <span class="sr-only">打开导航</span>
+        </button>
+
+        <nav class="site-nav" id="site-nav" data-nav>
+          <a href="#problem">问题</a>
+          <a href="#flow">怎么工作</a>
+          <a href="#powercontext">PowerContext</a>
+          <a href="#evidence">验证证据</a>
+          <a href="#start">运行</a>
+          <a class="nav-cta" href="https://github.com/curryxjh/powercontext/tree/2026-competition-ecosystem/qoder">代码仓库</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="hero" id="top">
+        <div class="hero-grid" aria-hidden="true"></div>
+        <div class="shell hero-inner">
+          <div class="hero-copy reveal">
+            <p class="eyebrow">
+              <span class="eyebrow-dot"></span>
+              2026 Qoder × OceanBase · Build with Qoder
+            </p>
+            <h1>
+              学过的东西，<br />
+              不该每次<span class="accent">重新开始</span>。
+            </h1>
+            <p class="hero-lead">
+              温故是一个学习接力教练。它把学习画像、知识卡片、复习、卡点与会话写成
+              <strong>PowerContext 记忆</strong>，下一次打开时，先告诉你该从哪一张卡接上。
+            </p>
+            <div class="hero-actions">
+              <a class="button primary" href="#flow">看它如何工作</a>
+              <a class="button ghost" href="https://github.com/curryxjh/powercontext/tree/2026-competition-ecosystem/qoder">
+                阅读代码与运行说明
+                <span aria-hidden="true">↗</span>
+              </a>
+            </div>
+            <ul class="hero-facts">
+              <li><span>0</span> 次模型调用</li>
+              <li><span>0</span> 个第二数据库</li>
+              <li><span>6</span> 类可追溯记忆</li>
+            </ul>
+          </div>
+
+          <div class="hero-visual reveal" data-delay="1">
+            <div class="browser-frame">
+              <div class="browser-bar">
+                <span class="browser-dots"><i></i><i></i><i></i></span>
+                <span class="browser-url">127.0.0.1:8010 · 今日接力</span>
+              </div>
+              <img
+                src="./assets/home.png"
+                alt="温故首页：今日接力计划、断点续学与学习画像"
+                width="1440"
+                height="2032"
+                fetchpriority="high"
+              />
+            </div>
+            <div class="float-card float-a">
+              <span class="float-label">PowerContext</span>
+              <strong>rev 5</strong>
+              <span>34 条记忆 · 2 份原始资料</span>
+            </div>
+            <div class="float-card float-b">
+              <span class="float-label">模型请求</span>
+              <strong>0</strong>
+              <span>离线运行，无需 API Key</span>
+            </div>
+            <div class="hero-stamp" aria-hidden="true">
+              <span>接力</span>
+              <span>RELAY</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="kinds" aria-label="六类学习记忆">
+        <div class="shell kinds-inner">
+          <p class="kinds-label">同一条记忆链路</p>
+          <ul class="kinds-list">
+            <li><span>01</span>学习画像</li>
+            <li><span>02</span>知识卡片</li>
+            <li><span>03</span>复习事件</li>
+            <li><span>04</span>卡点</li>
+            <li><span>05</span>学习会话</li>
+            <li><span>06</span>使用反馈</li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="section" id="problem">
+        <div class="shell">
+          <div class="section-head reveal">
+            <p class="chapter"><span>01</span> 问题</p>
+            <h2>缺的不是资料，是<span class="accent">接力</span>。</h2>
+            <p class="section-lead">
+              临时抱佛脚时，真正昂贵的不是「再看一遍」，而是重新建立上下文：
+              学过什么、卡在哪里、上次为什么停下。普通笔记只保存内容，不保存这些状态。
+            </p>
+          </div>
+
+          <div class="pain-grid">
+            <article class="pain reveal">
+              <span class="pain-index">A</span>
+              <h3>忘了自己学过什么</h3>
+              <p>收藏夹越来越长，真正复习过的内容却没有留下可检索的痕迹。</p>
+            </article>
+            <article class="pain reveal" data-delay="1">
+              <span class="pain-index">B</span>
+              <h3>每次都要重新解释背景</h3>
+              <p>向工具或同学重复目标、偏好和薄弱点，学习被切成一堆互不相连的片段。</p>
+            </article>
+            <article class="pain reveal" data-delay="2">
+              <span class="pain-index">C</span>
+              <h3>计划断掉就接不上</h3>
+              <p>停两天之后，不知道应该继续旧卡、补卡点，还是从头再来。</p>
+            </article>
+            <article class="pain reveal" data-delay="3">
+              <span class="pain-index">D</span>
+              <h3>不知道「记住」有没有发生</h3>
+              <p>看完一遍觉得懂了，但没有任何机制告诉你：下一次该在什么时候、复习哪一张。</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section section-tint" id="flow">
+        <div class="shell">
+          <div class="section-head reveal">
+            <p class="chapter"><span>02</span> 怎么工作</p>
+            <h2>一次只处理一张卡，<br />每一步都留下记忆。</h2>
+            <p class="section-lead">
+              没有神秘的推荐系统。温故把学习过程拆成可验证的事件，再用确定性的教练算法重放出计划。
+            </p>
+          </div>
+
+          <ol class="flow" role="list">
+            <li class="flow-step reveal">
+              <span class="flow-num">1</span>
+              <h3>导入</h3>
+              <p>粘贴 Markdown、<code>Q:/A:</code> 或普通段落。原文完整保存为 Source。</p>
+            </li>
+            <li class="flow-step reveal" data-delay="1">
+              <span class="flow-num">2</span>
+              <h3>拆卡</h3>
+              <p>每个知识点成为一张卡片，通过 <code>source_id</code> 指回原文，可改可删。</p>
+            </li>
+            <li class="flow-step reveal" data-delay="2">
+              <span class="flow-num">3</span>
+              <h3>自评</h3>
+              <p>0–3 四档诚实评价。评「忘记」的卡 10 分钟后重新出现，其余按 SM-2 风格扩展间隔。</p>
+            </li>
+            <li class="flow-step reveal" data-delay="3">
+              <span class="flow-num">4</span>
+              <h3>重放</h3>
+              <p>掌握度、逾期、卡点与 streak 全部由记忆事件重算，不维护第二套状态表。</p>
+            </li>
+            <li class="flow-step reveal" data-delay="4">
+              <span class="flow-num">5</span>
+              <h3>接上</h3>
+              <p>明天打开时，首页直接给出「先攻哪一张」和理由，而不是一张空白待办。</p>
+            </li>
+          </ol>
+
+          <div class="flow-note reveal">
+            <p>
+              <strong>断点续学不是一句文案。</strong>
+              最近一次会话、未解决卡点和最近复习共同决定今天的开场；会话总结会把「下次先攻」写成下一条记忆。
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section dark" id="powercontext">
+        <div class="shell">
+          <div class="section-head reveal">
+            <p class="chapter light"><span>03</span> 核心技术</p>
+            <h2>PowerContext 不是被换名的数据库，<br />它就是学习状态本身。</h2>
+            <p class="section-lead">
+              每个学习者一个 Scope；写入的是带类型的 Memory entry，原始笔记是 Source。
+              页面上的每个数字都能指回 entry、版本与 citation。
+            </p>
+          </div>
+
+          <div class="arch reveal">
+            <div class="arch-node">
+              <span class="arch-tag">Browser</span>
+              <strong>无构建前端</strong>
+              <small>首页 / 复习 / 记忆中心 / 成长</small>
+            </div>
+            <span class="arch-arrow" aria-hidden="true">→</span>
+            <div class="arch-node">
+              <span class="arch-tag">FastAPI</span>
+              <strong>确定性教练</strong>
+              <small>重放 · 计划 · 幂等会话</small>
+            </div>
+            <span class="arch-arrow" aria-hidden="true">→</span>
+            <div class="arch-node arch-core">
+              <span class="arch-tag">Embedded</span>
+              <strong>PowerContext 1.2.0</strong>
+              <small>Scope · Memory · Source · FTS · context.prepare</small>
+            </div>
+            <span class="arch-arrow" aria-hidden="true">→</span>
+            <div class="arch-node">
+              <span class="arch-tag">Storage</span>
+              <strong>本地 SQLite</strong>
+              <small>单一运行时 · 可备份 · 可导出</small>
+            </div>
+          </div>
+
+          <div class="capability-grid">
+            <article class="capability reveal">
+              <span class="cap-kicker">Scope</span>
+              <h3>学习空间彼此隔离</h3>
+              <p>每个学员独立 Scope；反馈写入共享反馈 Scope，不混进个人记忆。</p>
+            </article>
+            <article class="capability reveal" data-delay="1">
+              <span class="cap-kicker">Memory</span>
+              <h3>类型化负载 + 8192 字节预算</h3>
+              <p>人类可读文本与结构化字段同条保存；超长答案在写入前按 UTF-8 安全截断。</p>
+            </article>
+            <article class="capability reveal" data-delay="2">
+              <span class="cap-kicker">Source</span>
+              <h3>每张卡都能回到原文</h3>
+              <p>导入的笔记作为 Source 完整保存，卡片通过 <code>source_id</code> 建立关联。</p>
+            </article>
+            <article class="capability reveal" data-delay="3">
+              <span class="cap-kicker">FTS</span>
+              <h3>中文全文检索</h3>
+              <p>在记忆中心直接搜「卡点」「全概率」「梯度」，命中结果带分数与 entry 引用。</p>
+            </article>
+            <article class="capability reveal" data-delay="4">
+              <span class="cap-kicker">context.prepare</span>
+              <h3>上下文自带 citation</h3>
+              <p>「关于温故」页现场组装上下文，每条都带 <code>entry_id</code> 与版本，模型请求为 0。</p>
+            </article>
+            <article class="capability reveal" data-delay="5">
+              <span class="cap-kicker">revise / retire</span>
+              <h3>修改与遗忘都可追溯</h3>
+              <p>修订生成新版本，删除变为 inactive；旧 revision 仍保留在历史里。</p>
+            </article>
+          </div>
+
+          <div class="proof-grid">
+            <figure class="shot reveal">
+              <img
+                src="./assets/memory-detail.png"
+                alt="温故记忆详情：类型化元数据、entry_id、version_id、revision、citation 与原始资料"
+                width="1440"
+                height="1015"
+                loading="lazy"
+              />
+              <figcaption>
+                记忆详情不是后台日志：同一条 entry 里有可读文本、结构化字段、citation 与原始资料。
+              </figcaption>
+            </figure>
+
+            <div class="console reveal" data-delay="1">
+              <div class="console-bar">
+                <span>powercontext / proof</span>
+                <span class="console-dot"></span>
+              </div>
+              <pre><code><span class="c-muted">$</span> python scripts/verify_powercontext.py
+
+<span class="c-ok">PASS</span> powercontext   1.2.0
+<span class="c-ok">PASS</span> memory entries  44 total · rev 16
+<span class="c-ok">PASS</span> chinese FTS     "全概率" matched 9 memories
+<span class="c-ok">PASS</span> context.prepare  ready · 6 items
+<span class="c-ok">PASS</span> citations        6/6 cite entries
+<span class="c-ok">PASS</span> model requests   0 (offline, no API key)
+
+<span class="c-dim">Result: 15/15 checks passed</span></code></pre>
+              <p class="console-note">只读脚本从外部复核同一组事实，任一失败即以非 0 退出。</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="evidence">
+        <div class="shell">
+          <div class="section-head reveal">
+            <p class="chapter"><span>04</span> 验证证据</p>
+            <h2>可运行、可复核，<br />也可以被证伪。</h2>
+            <p class="section-lead">
+              不是「截图里看起来能跑」。所有关键行为都有自动化测试、只读验收脚本或可重复的 UI 路径。
+            </p>
+          </div>
+
+          <div class="metric-grid">
+            <div class="metric reveal">
+              <strong>46</strong>
+              <span>pytest 全部通过</span>
+            </div>
+            <div class="metric reveal" data-delay="1">
+              <strong>15/15</strong>
+              <span>只读验收检查</span>
+            </div>
+            <div class="metric reveal" data-delay="2">
+              <strong>44</strong>
+              <span>PowerContext 记忆条目</span>
+            </div>
+            <div class="metric reveal" data-delay="3">
+              <strong>0</strong>
+              <span>模型请求 · 无需 Key</span>
+            </div>
+          </div>
+
+          <div class="evidence-layout">
+            <div class="evidence-table reveal">
+              <h3>一条条可核验的行为</h3>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col">验证点</th>
+                      <th scope="col">实际结果</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>中文全文检索</td>
+                      <td>搜「全概率」命中 9 条，模式 <code>fts</code></td>
+                    </tr>
+                    <tr>
+                      <td>记忆修订</td>
+                      <td>revision +1，旧版本仍可追溯</td>
+                    </tr>
+                    <tr>
+                      <td>记忆删除</td>
+                      <td>active 44 → 43，计划与统计立即收缩</td>
+                    </tr>
+                    <tr>
+                      <td>会话幂等</td>
+                      <td>重复 <code>session_id</code> 返回 <code>duplicate: true</code></td>
+                    </tr>
+                    <tr>
+                      <td>Source 关联</td>
+                      <td>两张导入卡片指回同一份原文</td>
+                    </tr>
+                    <tr>
+                      <td>上下文引用</td>
+                      <td><code>context.prepare</code> 6/6 条目带 citation</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="doc-links">
+                <a href="https://github.com/curryxjh/powercontext/blob/2026-competition-ecosystem/qoder/docs/validation.md">验收样本 ↗</a>
+                <a href="https://github.com/curryxjh/powercontext/blob/2026-competition-ecosystem/qoder/docs/verify-output.txt">验收输出 ↗</a>
+                <a href="https://github.com/curryxjh/powercontext/blob/2026-competition-ecosystem/qoder/docs/usage-summary.json">使用汇总 ↗</a>
+              </div>
+            </div>
+
+            <figure class="shot shot-small reveal" data-delay="1">
+              <img
+                src="./assets/review-summary.png"
+                alt="一次复习结束后的会话总结：7 张已评价、7 次自评、连续 12 天，并给出下次先攻的卡片"
+                width="1440"
+                height="1000"
+                loading="lazy"
+              />
+              <figcaption>会话结束不是终点：下一条「先攻」已经写回记忆。</figcaption>
+            </figure>
+          </div>
+
+          <div class="gallery">
+            <figure class="shot reveal">
+              <img
+                src="./assets/memory-search.png"
+                alt="记忆中心检索「全概率」：命中 9 条，右侧显示 context.prepare 和 revision 历史"
+                width="1440"
+                height="1015"
+                loading="lazy"
+              />
+              <figcaption>中文 FTS + 现场上下文组装，结果来自当前 Scope。</figcaption>
+            </figure>
+            <figure class="shot reveal" data-delay="1">
+              <img
+                src="./assets/growth-feedback.png"
+                alt="成长与反馈页：真实 API 请求明细、接口聚合、学习会话和反馈记录"
+                width="1440"
+                height="1713"
+                loading="lazy"
+              />
+              <figcaption>使用日志只记路由与状态，不记学习内容与凭据。</figcaption>
+            </figure>
+          </div>
+        </div>
+      </section>
+
+      <section class="section section-tint" id="start">
+        <div class="shell start-grid">
+          <div class="start-copy reveal">
+            <p class="chapter"><span>05</span> 运行</p>
+            <h2>几步命令，<br />把接力跑起来。</h2>
+            <p class="section-lead">
+              需要 Python 3.11+。首次安装依赖需要联网，之后可以完全离线使用。
+              首次启动会自动写入一个可复现的演示学员。
+            </p>
+            <ul class="start-list">
+              <li><span>1</span> 本地 SQLite，无外部服务</li>
+              <li><span>2</span> 无登录、无 API Key、无模型调用</li>
+              <li><span>3</span> 随时导出该学员的全部记忆</li>
+            </ul>
+          </div>
+
+          <div class="code-card reveal" data-delay="1">
+            <div class="code-head">
+              <span>Windows PowerShell</span>
+              <button class="copy-button" type="button" data-copy-target="quickstart">复制</button>
+            </div>
+            <pre id="quickstart"><code>cd qoder
+
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe run.py
+
+# 打开 http://127.0.0.1:8010</code></pre>
+            <div class="code-foot">
+              <span>macOS / Linux</span>
+              <code>python3 run.py</code>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="boundaries">
+        <div class="shell">
+          <div class="section-head reveal">
+            <p class="chapter"><span>06</span> 边界</p>
+            <h2>把限制写清楚，<br />比把功能说满更重要。</h2>
+          </div>
+
+          <div class="boundary-grid">
+            <article class="boundary reveal">
+              <h3>单实例</h3>
+              <p>SQLite + 单 worker，适合个人或小班演示；不是多租户 SaaS。</p>
+            </article>
+            <article class="boundary reveal" data-delay="1">
+              <h3>无登录</h3>
+              <p>默认只监听 <code>127.0.0.1</code>。公网部署前应加反向代理与访问控制。</p>
+            </article>
+            <article class="boundary reveal" data-delay="2">
+              <h3>秒级时间戳</h3>
+              <p>同一张卡在同一秒内连续评两次的极端情况下，重放顺序可能不稳定；正常 10 分钟复现流程不受影响。</p>
+            </article>
+            <article class="boundary reveal" data-delay="3">
+              <h3>演示数据 ≠ 真实用户</h3>
+              <p>「林知夏」与其复习记录均为虚构演示，页面与文档均已标注；真实使用证据单独记录。</p>
+            </article>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="shell footer-grid">
+        <div>
+          <a class="brand footer-brand" href="#top">
+            <img src="./assets/logo.svg" alt="" width="34" height="34" />
+            <span class="brand-text">
+              <strong>温故</strong>
+              <span>WENGU</span>
+            </span>
+          </a>
+          <p class="footer-note">学习接力教练 · 2026 Qoder × OceanBase「Build with Qoder」参赛作品</p>
+        </div>
+        <div class="footer-links">
+          <a href="https://github.com/curryxjh/powercontext/tree/2026-competition-ecosystem/qoder">代码仓库</a>
+          <a href="https://github.com/curryxjh/powercontext/blob/2026-competition-ecosystem/qoder/README.md">运行说明</a>
+          <a href="https://github.com/curryxjh/powercontext/blob/2026-competition-ecosystem/qoder/docs/architecture.md">架构</a>
+          <a href="https://github.com/curryxjh/powercontext/blob/2026-competition-ecosystem/qoder/docs/qoder-devlog.md">Qoder 开发记录</a>
+        </div>
+        <div class="footer-fine">
+          <p>使用 PowerContext 1.2.0（Apache-2.0）embedded runtime。</p>
+          <p>本站为静态项目介绍页，应用本身在本机运行。</p>
+          <p>© 2026 WenGu</p>
+        </div>
+      </div>
+    </footer>
+  </body>
+</html>

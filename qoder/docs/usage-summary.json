@@ -1,0 +1,39 @@
+{
+  "window_days": 30,
+  "requests_total_logged": 61,
+  "requests_in_window": 61,
+  "active_days": 1,
+  "first_date": "2026-10-28",
+  "last_date": "2026-10-28",
+  "successful_memory_writes": 12,
+  "learners_observed": [
+    "demo"
+  ],
+  "by_date": {
+    "2026-10-28": 61
+  },
+  "by_route": {
+    "/api/learners/{slug}": 12,
+    "/api/learners/{slug}/reviews": 7,
+    "/api/learners/{slug}/memory": 7,
+    "/api/learners/{slug}/changes": 7,
+    "/api/bootstrap": 6,
+    "/api/feedback": 5,
+    "/api/health": 4,
+    "/api/learners/{slug}/stats": 3,
+    "/api/learners/{slug}/memory/{id}": 2,
+    "/api/learners/{slug}/proof": 2,
+    "/api/learners/{slug}/sessions": 1,
+    "/api/learners/{slug}/import": 1,
+    "/api/learners/{slug}/memory/{id}/revise": 1,
+    "/api/learners/{slug}/memory/{id}/retire": 1,
+    "/api/usage": 1,
+    "/api/learners": 1
+  },
+  "by_status": {
+    "200": 48,
+    "201": 10,
+    "404": 3
+  },
+  "generated_from": "data/usage.jsonl"
+}
