@@ -1,7 +1,6 @@
 import process from "node:process";
 import express, { type NextFunction, type Request, type Response } from "express";
 import type { Metadata } from "seekdb";
-import { embedTexts, embeddingHealth } from "./embedding";
 import {
   client,
   connectionTarget,
@@ -12,7 +11,6 @@ import {
   mapQueryResult,
 } from "./seekdb";
 import {
-  validateEmbeddingTexts,
   validateCollectionName,
   validateRecords,
   validateSearchBody,
@@ -24,7 +22,6 @@ const port = Number(process.env.API_PORT ?? 8787);
 app.use(express.json({ limit: "24mb" }));
 
 app.get("/api/health", async (_request, response) => {
-  const embedding = embeddingHealth();
   try {
     await client.execute("SELECT 1 AS ok");
     response.json({
@@ -32,7 +29,6 @@ app.get("/api/health", async (_request, response) => {
       mode: "server",
       target: connectionTarget(),
       database: databaseName(),
-      embedding,
     });
   } catch (error) {
     response.json({
@@ -40,15 +36,9 @@ app.get("/api/health", async (_request, response) => {
       mode: "server",
       target: connectionTarget(),
       database: databaseName(),
-      embedding,
       message: error instanceof Error ? error.message : String(error),
     });
   }
-});
-
-app.post("/api/embeddings", async (request, response) => {
-  const texts = validateEmbeddingTexts(request.body?.texts);
-  response.json(await embedTexts(texts));
 });
 
 app.get("/api/collections", async (_request, response) => {

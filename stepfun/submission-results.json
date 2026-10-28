@@ -1,0 +1,187 @@
+{
+  "schema": "stepfun.submission-results/v1",
+  "status": "passed",
+  "project": "powercontext/stepfun",
+  "fixedOutcome": {
+    "passed": 20,
+    "total": 20,
+    "failed": 0,
+    "score": 1
+  },
+  "total": 20,
+  "passed": 20,
+  "failed": 0,
+  "evaluation": {
+    "name": "fixed-query-retrieval",
+    "passCondition": "The expected source appears in the first three results returned by SeekDB native hybridSearch.",
+    "collection": "edge_notes",
+    "documents": [
+      "edge-ai-notes.txt",
+      "seekdb-overview.md",
+      "TECHNICAL_NOTE.md"
+    ],
+    "importedTextBlocks": 6
+  },
+  "results": [
+    {
+      "id": "fixed-01",
+      "query": "为什么混合检索适合同时处理术语和自然语言问题？",
+      "expectedSource": "seekdb-overview.md",
+      "matchedInTop3": true,
+      "passed": true
+    },
+    {
+      "id": "fixed-02",
+      "query": "浏览器不下载模型时如何生成文档向量？",
+      "expectedSource": "edge-ai-notes.txt",
+      "matchedInTop3": true,
+      "passed": true
+    },
+    {
+      "id": "fixed-03",
+      "query": "重复导入同一个文件会发生什么？",
+      "expectedSource": "TECHNICAL_NOTE.md",
+      "matchedInTop3": true,
+      "passed": true
+    },
+    {
+      "id": "fixed-04",
+      "query": "如何让刚写入的数据立即可搜索？",
+      "expectedSource": "seekdb-overview.md",
+      "matchedInTop3": true,
+      "passed": true
+    },
+    {
+      "id": "fixed-05",
+      "query": "WebGPU 和 WASM 的区别是什么？",
+      "expectedSource": "edge-ai-notes.txt",
+      "matchedInTop3": true,
+      "passed": true
+    },
+    {
+      "id": "fixed-06",
+      "query": "q8 对下载体积和内存有什么影响？",
+      "expectedSource": "edge-ai-notes.txt",
+      "matchedInTop3": true,
+      "passed": true
+    },
+    {
+      "id": "fixed-07",
+      "query": "为什么使用 Web Worker？",
+      "expectedSource": "edge-ai-notes.txt",
+      "matchedInTop3": true,
+      "passed": true
+    },
+    {
+      "id": "fixed-08",
+      "query": "RRF 如何融合召回结果？",
+      "expectedSource": "seekdb-overview.md",
+      "matchedInTop3": true,
+      "passed": true
+    },
+    {
+      "id": "fixed-09",
+      "query": "关键词检索适合查找什么？",
+      "expectedSource": "seekdb-overview.md",
+      "matchedInTop3": true,
+      "passed": true
+    },
+    {
+      "id": "fixed-10",
+      "query": "向量检索适合处理什么？",
+      "expectedSource": "seekdb-overview.md",
+      "matchedInTop3": true,
+      "passed": true
+    },
+    {
+      "id": "fixed-11",
+      "query": "原文、embedding、元数据保存在哪里？",
+      "expectedSource": "seekdb-overview.md",
+      "matchedInTop3": true,
+      "passed": true
+    },
+    {
+      "id": "fixed-12",
+      "query": "浏览器 embedding 为什么不调用远程 API？",
+      "expectedSource": "TECHNICAL_NOTE.md",
+      "matchedInTop3": true,
+      "passed": true
+    },
+    {
+      "id": "fixed-13",
+      "query": "同名同内容文件如何避免重复追加？",
+      "expectedSource": "TECHNICAL_NOTE.md",
+      "matchedInTop3": true,
+      "passed": true
+    },
+    {
+      "id": "fixed-14",
+      "query": "文档指纹和分块 ID 为什么稳定？",
+      "expectedSource": "TECHNICAL_NOTE.md",
+      "matchedInTop3": true,
+      "passed": true
+    },
+    {
+      "id": "fixed-15",
+      "query": "每批默认处理多少文本块？",
+      "expectedSource": "TECHNICAL_NOTE.md",
+      "matchedInTop3": true,
+      "passed": true
+    },
+    {
+      "id": "fixed-16",
+      "query": "为什么 SeekDB 不使用默认 embedding？",
+      "expectedSource": "seekdb-overview.md",
+      "matchedInTop3": true,
+      "passed": true
+    },
+    {
+      "id": "fixed-17",
+      "query": "SeekDB collection 的向量维度是多少？",
+      "expectedSource": "seekdb-overview.md",
+      "matchedInTop3": true,
+      "passed": true
+    },
+    {
+      "id": "fixed-18",
+      "query": "WebGPU 初始化失败后如何处理？",
+      "expectedSource": "edge-ai-notes.txt",
+      "matchedInTop3": true,
+      "passed": true
+    },
+    {
+      "id": "fixed-19",
+      "query": "查询和文档是否使用同一个模型？",
+      "expectedSource": "TECHNICAL_NOTE.md",
+      "matchedInTop3": true,
+      "passed": true
+    },
+    {
+      "id": "fixed-20",
+      "query": "服务端查询端点调用哪个 SeekDB 方法？",
+      "expectedSource": "TECHNICAL_NOTE.md",
+      "matchedInTop3": true,
+      "passed": true
+    }
+  ],
+  "runtimeEvidence": {
+    "browserUrl": "http://127.0.0.1:5173/",
+    "modelBackend": "webgpu",
+    "modelDtype": "q8",
+    "model": "Xenova/paraphrase-multilingual-MiniLM-L12-v2",
+    "seekdbTarget": "127.0.0.1:2881",
+    "seekdbDatabase": "test",
+    "collection": "edge_notes",
+    "health": "ok",
+    "searchEndpoint": "POST /api/collections/edge_notes/search",
+    "searchImplementation": "collection.hybridSearch with RRF"
+  },
+  "sourceEvidence": [
+    "index.html:14 -> src/main.tsx",
+    "src/App.tsx:80-81 -> useEmbeddingWorker",
+    "src/workers/embedding.worker.ts:69-76 -> WebGPU then WASM",
+    "server/seekdb.ts:35-40 -> SeekDB full text and vector schema",
+    "server/index.ts:68-78 -> upsert then refresh_index",
+    "server/index.ts:103-120 -> hybridSearch with RRF"
+  ]
+}

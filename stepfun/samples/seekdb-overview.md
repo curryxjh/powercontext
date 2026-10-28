@@ -5,6 +5,5 @@ seekdb 面向 AI 应用提供向量、全文和结构化数据能力。应用可
 混合检索把关键词匹配和语义召回放在同一次数据库调用中。关键词检索适合精确术语、产品名和错误码，向量检索适合语义相近但措辞不同的问题。RRF（Reciprocal Rank Fusion）根据两条召回链路中的排名融合结果，不要求两种分数具有相同量纲。
 
 新增数据后调用 refresh_index 可以让最新写入尽快进入可搜索状态。对于交互式知识库，导入批次完成后刷新索引能够避免用户刚导入文档却立即搜索不到的体验。
-也就是说，刚写入的数据在刷新索引后即可立即被搜索。
 
-本示例不使用 seekdb 默认 embedding。Node API 调用 Qwen 生成 1024 维向量，再通过 seekdb-js 将向量与原文一起写入 collection。
+本示例不使用 seekdb 默认 embedding。浏览器中的 Transformers.js 生成 384 维归一化向量，Node 服务通过 seekdb-js 将向量与原文一起写入 collection。

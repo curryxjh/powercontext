@@ -1,0 +1,96 @@
+{
+  "schema": "stepfun.performance-results/v1",
+  "status": "passed",
+  "runtime": {
+    "browserUrl": "http://127.0.0.1:5173/",
+    "model": "Xenova/paraphrase-multilingual-MiniLM-L12-v2",
+    "dtype": "q8",
+    "backend": "webgpu",
+    "database": "seekdb",
+    "databaseTarget": "127.0.0.1:2881",
+    "databaseName": "test",
+    "collection": "edge_notes",
+    "importedTextBlocks": 6
+  },
+  "measurements": [
+    {
+      "stage": "model-load",
+      "label": "量化模型加载",
+      "durationMs": 26910,
+      "backend": "webgpu",
+      "source": "real browser run"
+    },
+    {
+      "stage": "document-embedding",
+      "label": "文档向量化 edge-ai-notes.txt",
+      "durationMs": 537,
+      "source": "real browser run"
+    },
+    {
+      "stage": "database-write",
+      "label": "写入 edge-ai-notes.txt",
+      "durationMs": 52,
+      "source": "real browser run"
+    },
+    {
+      "stage": "index-refresh",
+      "label": "刷新 seekdb 索引 after edge-ai-notes.txt",
+      "durationMs": 618,
+      "source": "real browser run"
+    },
+    {
+      "stage": "document-embedding",
+      "label": "文档向量化 seekdb-overview.md",
+      "durationMs": 342,
+      "source": "real browser run"
+    },
+    {
+      "stage": "database-write",
+      "label": "写入 seekdb-overview.md",
+      "durationMs": 3,
+      "source": "real browser run"
+    },
+    {
+      "stage": "index-refresh",
+      "label": "刷新 seekdb 索引 after seekdb-overview.md",
+      "durationMs": 606,
+      "source": "real browser run"
+    },
+    {
+      "stage": "document-embedding",
+      "label": "文档向量化 TECHNICAL_NOTE.md",
+      "durationMs": 1280,
+      "source": "real browser run"
+    },
+    {
+      "stage": "database-write",
+      "label": "写入 TECHNICAL_NOTE.md",
+      "durationMs": 40,
+      "source": "real browser run"
+    },
+    {
+      "stage": "index-refresh",
+      "label": "刷新 seekdb 索引 after TECHNICAL_NOTE.md",
+      "durationMs": 809,
+      "source": "real browser run"
+    }
+  ],
+  "aggregates": {
+    "documentEmbeddingMs": 2159,
+    "databaseWriteMs": 95,
+    "indexRefreshMs": 2033,
+    "queryEmbeddingMsObservedRange": [
+      48,
+      62
+    ],
+    "hybridSearchMsObservedRange": [
+      2,
+      53
+    ]
+  },
+  "notes": [
+    "The model-load, document-embedding, write, and refresh values are measured browser-run values.",
+    "Query embedding and native hybrid-search values are recorded as observed ranges because they varied across the fixed-query run.",
+    "The live browser displayed WEBGPU · q8; the source compliance result separately proves the WASM fallback path."
+  ]
+}

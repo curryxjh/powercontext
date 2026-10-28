@@ -1,7 +1,6 @@
 import type {
   CollectionSummary,
   DocumentRecord,
-  EmbeddingResponse,
   HealthResponse,
   ImportResponse,
   SearchResponse,
@@ -30,11 +29,6 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   health: () => request<HealthResponse>("/api/health"),
-  embed: (texts: string[]) =>
-    request<EmbeddingResponse>("/api/embeddings", {
-      method: "POST",
-      body: JSON.stringify({ texts }),
-    }),
   collections: () => request<{ collections: CollectionSummary[] }>("/api/collections"),
   createCollection: (name: string) =>
     request<{ collection: CollectionSummary }>("/api/collections", {

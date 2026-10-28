@@ -84,18 +84,6 @@ export function validateRecords(value: unknown): DocumentRecord[] {
   });
 }
 
-export function validateEmbeddingTexts(value: unknown): string[] {
-  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_BATCH_SIZE) {
-    throw new Error(`texts must contain 1-${MAX_BATCH_SIZE} items`);
-  }
-  return value.map((item, index) => {
-    if (typeof item !== "string" || item.trim().length === 0 || item.length > 20_000) {
-      throw new Error(`texts[${index}] must contain 1-20000 characters`);
-    }
-    return item;
-  });
-}
-
 export function validateSearchBody(value: unknown): {
   query: string;
   embedding: number[];

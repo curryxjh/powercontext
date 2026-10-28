@@ -1,8 +1,8 @@
-# 技术说明：Qwen embedding 与 seekdb 原生混合检索
+# 技术说明：浏览器端推理与 seekdb 原生混合检索
 
 ## 目标与边界
 
-本项目把 embedding 和检索职责明确分开。Node API 负责调用 Qwen embedding 服务，并把向量、原文和元数据写入 seekdb；浏览器只负责文件读取、交互和结果展示。全文检索、向量召回和融合排名均留在 seekdb 内完成。
+本项目把计算和检索职责明确分开。浏览器负责所有 embedding 推理，Node 服务只接收向量、原文和元数据并调用 seekdb。这样可以直接观察端侧推理后端与耗时，同时避免 Node 侧重复加载模型。全文检索、向量召回和融合排名均留在 seekdb 内完成。
 
 ## 数据流
 
@@ -13,8 +13,8 @@
 规范化与重叠分块（700 字符，100 字符 overlap）
     │
     ▼
-Node API + Qwen OpenAI-compatible API
-qwen3.7-text-embedding，1024 维
+Web Worker + Transformers.js
+q8 paraphrase-multilingual-MiniLM-L12-v2，384 维，mean pooling + normalize
     │
     ▼
 Node API 参数校验
@@ -41,7 +41,12 @@ collection.hybridSearch({
 
 ## 端侧推理策略
 
-模型固定为 `qwen3.7-text-embedding`。Node API 通过 OpenAI 兼容的 `/embeddings` 接口向 Qwen 发送批量文本，返回向量后再写入 seekdb。API 密钥只存在本机 `.env`，不会下发到浏览器。
+模型固定为 `Xenova/paraphrase-multilingual-MiniLM-L12-v2`，精度固定为 `q8`。Worker 首先尝试 `device: "webgpu"`；如果 pipeline 初始化失败，会记录失败原因并重新以 `device: "wasm"` 初始化。实际后端、下载进度、模型加载耗时和推理耗时都会回传主线程。
+
+模型放在独立 Worker 中有两个直接收益：
+
+1. 模型下载、初始化和推理不会阻塞 React 主线程。
+2. 文档和查询共用一个已加载 pipeline，避免重复初始化。
 
 ## 增量导入
 
@@ -54,18 +59,18 @@ collection.hybridSearch({
 collection 同时启用：
 
 - `FulltextIndexConfig("ik", { ik_mode: "smart" })`
-- 1024 维 HNSW vector index；距离沿用 `seekdb@1.4.0` 的默认 cosine
+- 384 维 cosine HNSW vector index
 - `embeddingFunction: null`
 
-显式设置 `embeddingFunction: null` 是必要的职责声明：向量由 Qwen API 生成，seekdb 不应安装或调用默认 embedding 包。
+显式设置 `embeddingFunction: null` 是必要的职责声明：向量由浏览器生成，seekdb 不应安装或调用默认 embedding 包。
 
 ## 性能采集
 
 浏览器使用 `performance.now()`，服务端也返回数据库操作的阶段耗时。采集项包括：
 
+- 模型下载与初始化
 - 文件读取和文本分块
 - 文档 embedding
-- Qwen API 请求
 - seekdb 写入
 - `refresh_index()`
 - 查询 embedding
@@ -75,7 +80,7 @@ collection 同时启用：
 
 ## 风险控制
 
-- API 严格验证 collection 名、批量大小、文档长度和 1024 维有限数值向量。
+- API 严格验证 collection 名、批量大小、文档长度和 384 维有限数值向量。
 - 模型 ID、精度和维度集中定义，避免前后端参数漂移。
-- 原文只发送到本机 Node API；页面不直接调用远程 embedding API。
-- Qwen 配置缺失或请求失败会在页面显示错误；密钥不会经过浏览器。
+- 原文只发送到本机 Node API；页面不调用远程 embedding API。
+- Worker 初始化失败会显式显示错误；WebGPU 失败会自动降级而不是中断流程。

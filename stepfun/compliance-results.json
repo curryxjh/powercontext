@@ -1,0 +1,74 @@
+{
+  "schema": "stepfun.compliance-results/v1",
+  "status": "passed",
+  "checks": [
+    {
+      "id": "browser-entry",
+      "status": "passed",
+      "claim": "The submitted application is entered from a browser page and renders the React application.",
+      "evidence": [
+        "index.html:14 loads /src/main.tsx as a module script.",
+        "src/main.tsx:1-4 renders App into the browser root element.",
+        "src/App.tsx:80-81 calls useEmbeddingWorker from the browser application."
+      ]
+    },
+    {
+      "id": "browser-embedding",
+      "status": "passed",
+      "claim": "Document and query embeddings are generated in a browser Web Worker with Transformers.js.",
+      "evidence": [
+        "src/hooks/useEmbeddingWorker.ts:40-43 creates a module Web Worker.",
+        "src/workers/embedding.worker.ts:41-53 loads the feature-extraction pipeline with a browser device and q8 dtype.",
+        "src/App.tsx:266-276 embeds document batches before sending vectors to the API.",
+        "src/App.tsx:340-355 embeds the query before searching."
+      ]
+    },
+    {
+      "id": "webgpu-wasm",
+      "status": "passed",
+      "claim": "The browser embedding path proves both WebGPU use and WASM fallback.",
+      "evidence": [
+        "src/workers/embedding.worker.ts:69-71 first loads the pipeline with device webgpu.",
+        "src/workers/embedding.worker.ts:72-76 retries with device wasm after WebGPU initialization fails.",
+        "src/workers/embedding.worker.ts:79-84 reports the selected backend and fallback reason.",
+        "src/hooks/useEmbeddingWorker.ts:62-74 exposes the selected backend and load result to the application."
+      ]
+    },
+    {
+      "id": "seekdb-schema",
+      "status": "passed",
+      "claim": "The API creates and opens a SeekDB collection with full text and a 384-dimensional HNSW vector index.",
+      "evidence": [
+        "server/seekdb.ts:35-40 defines the full text index, HNSW dimension, and embeddingFunction: null.",
+        "server/seekdb.ts:51-60 creates and opens collections with the same external embedding contract."
+      ]
+    },
+    {
+      "id": "seekdb-write-refresh",
+      "status": "passed",
+      "claim": "Imported browser vectors are written to SeekDB and the index is refreshed after each batch.",
+      "evidence": [
+        "server/index.ts:62-73 validates records and calls collection.upsert with ids, documents, embeddings, and metadata.",
+        "server/index.ts:76-86 calls collection.refresh_index and returns write and refresh timings."
+      ]
+    },
+    {
+      "id": "seekdb-hybrid-search",
+      "status": "passed",
+      "claim": "Search uses SeekDB native hybrid search with keyword retrieval, KNN retrieval, and RRF ranking.",
+      "evidence": [
+        "server/index.ts:97-120 calls collection.hybridSearch with whereDocument, queryEmbeddings, and RRF configuration.",
+        "server/index.ts:121-127 returns the mapped SeekDB result order and database timing."
+      ]
+    }
+  ],
+  "runtimeEvidence": {
+    "browserUrl": "http://127.0.0.1:5173/",
+    "browserModelStatus": "WEBGPU · q8",
+    "databaseStatus": "seekdb · test",
+    "healthEndpoint": "GET /api/health returned ok=true",
+    "collection": "edge_notes",
+    "importedTextBlocks": 6,
+    "searchEndpoint": "POST /api/collections/edge_notes/search returned 200"
+  }
+}

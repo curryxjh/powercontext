@@ -16,16 +16,16 @@ import {
   X,
 } from "lucide-react";
 import {
-  EMBEDDING_DIMENSION,
-  EMBEDDING_PROVIDER,
   COLLECTION_NAME_PATTERN,
   MAX_BATCH_SIZE,
+  MODEL_DTYPE,
   MODEL_ID,
   type CollectionSummary,
   type DocumentRecord,
   type HealthResponse,
   type SearchResultItem,
 } from "../shared/contracts";
+import { useEmbeddingWorker } from "./hooks/useEmbeddingWorker";
 import { api } from "./lib/api";
 import { chunkText, documentFingerprint } from "./lib/chunk";
 import {
@@ -43,37 +43,6 @@ interface ImportProgress {
   label: string;
 }
 
-async function clearLegacyEmbeddingCaches(): Promise<void> {
-  if ("caches" in window) {
-    const cacheNames = await window.caches.keys();
-    await Promise.all(
-      cacheNames
-        .filter((name) => /transformers|huggingface|onnx/i.test(name))
-        .map((name) => window.caches.delete(name)),
-    );
-  }
-
-  if ("databases" in indexedDB) {
-    const databases = await indexedDB.databases();
-    await Promise.all(
-      databases
-        .filter(
-          (database): database is IDBDatabaseInfo & { name: string } =>
-            typeof database.name === "string" &&
-            /transformers|huggingface|onnx/i.test(database.name),
-        )
-        .map((database) => database.name)
-        .map(
-          (name) =>
-            new Promise<void>((resolve) => {
-              const request = indexedDB.deleteDatabase(name);
-              request.onsuccess = request.onerror = request.onblocked = () => resolve();
-            }),
-        ),
-    );
-  }
-}
-
 function formatDuration(value: number): string {
   if (value < 1) {
     return "<1 ms";
@@ -82,6 +51,14 @@ function formatDuration(value: number): string {
     return `${Math.round(value)} ms`;
   }
   return `${(value / 1000).toFixed(2)} s`;
+}
+
+function formatProgress(value: number | null): string {
+  if (value === null) {
+    return "准备模型";
+  }
+  const normalized = value <= 1 ? value * 100 : value;
+  return `${Math.min(100, Math.max(0, normalized)).toFixed(0)}%`;
 }
 
 function fileTypeAllowed(file: File): boolean {
@@ -101,6 +78,7 @@ function downloadJson(filename: string, value: unknown) {
 }
 
 export default function App() {
+  const { model, embed } = useEmbeddingWorker();
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [collections, setCollections] = useState<CollectionSummary[]>([]);
   const [selectedCollection, setSelectedCollection] = useState("");
@@ -117,6 +95,7 @@ export default function App() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const modelMetricRecorded = useRef(false);
 
   const selectedSummary = collections.find(
     (collection) => collection.name === selectedCollection,
@@ -150,21 +129,32 @@ export default function App() {
         mode: "server",
         target: "127.0.0.1:2881",
         database: "test",
-        embedding: {
-          ok: false,
-          provider: EMBEDDING_PROVIDER,
-          model: MODEL_ID,
-          dimension: EMBEDDING_DIMENSION,
-        },
         message: nextError instanceof Error ? nextError.message : String(nextError),
       });
     }
   }
 
   useEffect(() => {
-    void clearLegacyEmbeddingCaches();
     void checkDatabase();
   }, []);
+
+  useEffect(() => {
+    if (
+      model.status === "ready" &&
+      model.loadMs !== null &&
+      !modelMetricRecorded.current
+    ) {
+      const loadMs = model.loadMs;
+      modelMetricRecorded.current = true;
+      setMetrics((current) => [
+        ...current,
+        createMetric("model-load", "量化模型加载", loadMs, {
+          backend: model.backend ?? "unknown",
+          dtype: MODEL_DTYPE,
+        }),
+      ]);
+    }
+  }, [model.backend, model.loadMs, model.status]);
 
   function reportError(nextError: unknown) {
     setNotice("");
@@ -233,7 +223,7 @@ export default function App() {
   }
 
   async function importFiles() {
-    if (!selectedCollection || files.length === 0 || !health?.embedding.ok) {
+    if (!selectedCollection || files.length === 0 || model.status !== "ready") {
       return;
     }
 
@@ -287,7 +277,7 @@ export default function App() {
             label: `向量化 ${item.file.name}`,
           });
 
-          const embedded = await api.embed(texts);
+          const embedded = await embed(texts);
           setMetrics((current) => [
             ...current,
             createMetric(
@@ -312,7 +302,7 @@ export default function App() {
                 chunkIndex,
                 sourceBytes: item.file.size,
                 model: MODEL_ID,
-                dimension: embedded.dimension,
+                dtype: MODEL_DTYPE,
                 backend: embedded.backend,
               },
             };
@@ -373,7 +363,7 @@ export default function App() {
 
   async function runSearch() {
     const normalizedQuery = query.trim();
-    if (!selectedCollection || !normalizedQuery || !health?.embedding.ok) {
+    if (!selectedCollection || !normalizedQuery || model.status !== "ready") {
       return;
     }
 
@@ -381,7 +371,7 @@ export default function App() {
     setError("");
     setNotice("");
     try {
-      const embedded = await api.embed([normalizedQuery]);
+      const embedded = await embed([normalizedQuery]);
       setMetrics((current) => [
         ...current,
         createMetric("query-embedding", "查询向量化", embedded.inferenceMs, {
@@ -415,8 +405,9 @@ export default function App() {
       exportedAt: new Date().toISOString(),
       model: {
         id: MODEL_ID,
-        provider: EMBEDDING_PROVIDER,
-        dimension: EMBEDDING_DIMENSION,
+        dtype: MODEL_DTYPE,
+        backend: model.backend,
+        fallbackReason: model.fallbackReason,
       },
       database: health,
       collection: selectedCollection,
@@ -442,12 +433,14 @@ export default function App() {
           </div>
         </div>
         <div className="status-cluster" aria-label="运行状态">
-          <div className={`status-item ${health?.embedding.ok ? "is-ok" : "is-error"}`}>
+          <div className={`status-item ${model.status === "ready" ? "is-ok" : ""}`}>
             <Cpu size={15} />
             <span>
-              {health?.embedding.ok
-                ? `QWEN API · ${EMBEDDING_DIMENSION}维`
-                : "Qwen 未配置"}
+              {model.status === "ready"
+                ? `${model.backend?.toUpperCase()} · ${MODEL_DTYPE}`
+                : model.status === "error"
+                  ? "模型异常"
+                  : `模型 ${formatProgress(model.progress)}`}
             </span>
           </div>
           <div className={`status-item ${health?.ok ? "is-ok" : "is-error"}`}>
@@ -570,7 +563,7 @@ export default function App() {
             </div>
             <div className="context-facts">
               <span>{selectedSummary?.count ?? 0} 个文本块</span>
-              <span>{selectedSummary?.dimension ?? EMBEDDING_DIMENSION} 维</span>
+              <span>{selectedSummary?.dimension ?? 384} 维</span>
               <span>{selectedSummary?.distance ?? "cosine"}</span>
             </div>
           </section>
@@ -606,7 +599,7 @@ export default function App() {
               >
                 <FileUp size={24} />
                 <strong>选择或拖入文档</strong>
-                <span>.txt / .md · 通过 Qwen API 向量化</span>
+                <span>.txt / .md · 浏览器本地处理</span>
               </button>
               <input
                 ref={fileInputRef}
@@ -662,7 +655,7 @@ export default function App() {
                 disabled={
                   !selectedCollection ||
                   files.length === 0 ||
-                  !health?.embedding.ok ||
+                  model.status !== "ready" ||
                   busy !== null
                 }
               >
@@ -716,7 +709,7 @@ export default function App() {
                     disabled={
                       !selectedCollection ||
                       !query.trim() ||
-                      !health?.embedding.ok ||
+                      model.status !== "ready" ||
                       busy !== null
                     }
                   >
@@ -790,9 +783,11 @@ export default function App() {
       </div>
 
       <footer className="runtime-footer">
-        <span>{MODEL_ID} · {EMBEDDING_DIMENSION}维</span>
+        <span>{MODEL_ID}</span>
         <span>batch {EMBEDDING_BATCH_SIZE}/{MAX_BATCH_SIZE}</span>
-        <span>服务端代理</span>
+        {model.fallbackReason && (
+          <span title={model.fallbackReason}>WebGPU 已降级至 WASM</span>
+        )}
       </footer>
     </div>
   );
