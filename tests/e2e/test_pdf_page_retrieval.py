@@ -250,6 +250,7 @@ def test_complete_pdf_page_larger_than_memory_text_limit_survives_reopen(tmp_pat
         assert len(expected.encode("utf-8")) > 8192
         source = await registry.resolve(page)
         async with open_builtin_runtime(settings) as runtime:
+            assert runtime.scopes is not None
             scope = await runtime.scopes.create(
                 ScopeDraft(title="Report", summary="Evidence", idempotency_key="report")
             )
